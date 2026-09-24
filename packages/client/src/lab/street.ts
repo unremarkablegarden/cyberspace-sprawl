@@ -47,6 +47,42 @@ const CUT = /* glsl */ `
     return smoothstep(0.3, 1.8, ahead) * (1.0 - smoothstep(7.0, 10.0, across)) * (1.0 - smoothstep(30.0, 34.0, ahead));
   }`
 
+/**
+ * Things that stand on or hang off buildings (signs, roof kit, capsule pods)
+ * vanish with the building when the cutaway takes it, instead of floating.
+ * Meshes go whole, by their origin; wires (`perFragment`) are clipped where
+ * they cross the cut. Wraps whatever patch the material already has.
+ */
+function cutHide<T extends Material>(m: T, perFragment = false): T {
+  const prev = m.onBeforeCompile.bind(m)
+  const prevKey = m.customProgramCacheKey.bind(m)
+  m.onBeforeCompile = (shader, renderer) => {
+    prev(shader, renderer)
+    shader.uniforms.uFocus = focus
+    shader.uniforms.uView = view
+    if (perFragment) {
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>\n${CUT}`)
+        .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\nif (cutaway(vHzW.xz) > 0.5) discard;`)
+      return
+    }
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>\n${CUT}`)
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        #ifdef USE_INSTANCING
+          vec4 cutO = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        #else
+          vec4 cutO = modelMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        #endif
+        if (cutaway(cutO.xz) > 0.5) transformed = vec3(0.0);`,
+      )
+  }
+  m.customProgramCacheKey = () => `${prevKey()}-cut${perFragment ? 'f' : 'v'}`
+  return m
+}
+
 /** Concrete with ribbon windows, lit at night; takes the cutaway. */
 function facade(hex: number, key: string): MeshStandardMaterial {
   const m = new MeshStandardMaterial({ color: hex, roughness: 0.9 })
@@ -272,7 +308,7 @@ export function buildStreet(map: DistrictMap): Street {
 
   // Buildings: each block split into lots; each lot a podium and a tower.
   const facades = CONCRETE.map((hex, i) => facade(hex, String(i)))
-  const roofMat = hazed(new MeshStandardMaterial({ color: 0x9c998f, roughness: 0.8 }), 'roofkit')
+  const roofMat = cutHide(hazed(new MeshStandardMaterial({ color: 0x9c998f, roughness: 0.8 }), 'roofkit'))
   const heightAt = (x: number, y: number) => map.heights[y * map.width + x] ?? 1
   const add = (geo: BufferGeometry, mat: Material, x: number, z: number, y = 0) => {
     const m = new Mesh(geo, mat)
@@ -318,8 +354,8 @@ export function buildStreet(map: DistrictMap): Street {
 
   // The capsule hotel as a Nakagin-style tower: two concrete cores with
   // white pods hung off them, each with a round window.
-  const podMat = hazed(new MeshStandardMaterial({ color: 0xe4e0d6, roughness: 0.45 }), 'pod')
-  const portMat = hazed(new MeshStandardMaterial({ color: 0x1c1d1f, roughness: 0.2, metalness: 0.4 }), 'port')
+  const podMat = cutHide(hazed(new MeshStandardMaterial({ color: 0xe4e0d6, roughness: 0.45 }), 'pod'))
+  const portMat = cutHide(hazed(new MeshStandardMaterial({ color: 0x1c1d1f, roughness: 0.2, metalness: 0.4 }), 'port'))
   for (const [bx0, by0, bx1, by1] of blocks(map, Tile.Capsule)) {
     const cx = (bx0 + bx1) / 2, cz = (by0 + by1) / 2
     const floors = 8
@@ -341,8 +377,8 @@ export function buildStreet(map: DistrictMap): Street {
 
   // Blade signs sticking out from the facade.
   const neon = map.props.filter((p) => p.kind === PropKind.Neon)
-  const signMat = hazed(new MeshBasicMaterial({ map: signTexture() }), 'sign')
-  const glowMat = new MeshBasicMaterial({ map: radial('rgba(255,255,255,0.9)', 'rgba(255,255,255,0)'), transparent: true, blending: AdditiveBlending, depthWrite: false })
+  const signMat = cutHide(hazed(new MeshBasicMaterial({ map: signTexture() }), 'sign'))
+  const glowMat = cutHide(new MeshBasicMaterial({ map: radial('rgba(255,255,255,0.9)', 'rgba(255,255,255,0)'), transparent: true, blending: AdditiveBlending, depthWrite: false }))
   const signs = inst(roundedBox(0.07, 1.1, 0.32, 0.025), signMat, neon.length)
   const glows = inst(new PlaneGeometry(1.4, 2.2), glowMat, neon.length)
   const faces = [[0, 0.5], [-0.5, 0], [0, -0.5], [0.5, 0]] as const
@@ -447,7 +483,7 @@ export function buildStreet(map: DistrictMap): Street {
     g.fillRect(0, 0, 32, 128)
     return new CanvasTexture(c)
   })()
-  const streakMat = new MeshBasicMaterial({ map: streakTex, transparent: true, depthWrite: false, blending: AdditiveBlending })
+  const streakMat = cutHide(new MeshBasicMaterial({ map: streakTex, transparent: true, depthWrite: false, blending: AdditiveBlending }))
   const streaks = inst(new PlaneGeometry(1, 1).rotateX(-Math.PI / 2), streakMat, reflect.length)
   // Streaks point at the camera, so they are laid out again when it turns.
   const layStreaks = (vx: number, vz: number) => {
@@ -503,7 +539,7 @@ export function buildStreet(map: DistrictMap): Street {
     }
   const wireGeo = new BufferGeometry()
   wireGeo.setAttribute('position', new BufferAttribute(new Float32Array(pts), 3))
-  group.add(new LineSegments(wireGeo, hazed(new LineBasicMaterial({ color: 0x1c1b1a }), 'wire')))
+  group.add(new LineSegments(wireGeo, cutHide(hazed(new LineBasicMaterial({ color: 0x1c1b1a }), 'wire'), true)))
 
   return {
     group,
