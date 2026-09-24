@@ -94,7 +94,7 @@ streetScene.add(life.group)
 
 // Isometric camera, 30° down, shared by street and capsule. Zoom is the world
 // height of the screen: wheel, pinch, or + and -. On the street it also turns:
-// drag, or Q and E for quarter turns. The capsule stays on the south-east,
+// drag, a sideways two-finger swipe, or hold Q / E. The capsule stays on the south-east,
 // where its cut-open side faces.
 const ZOOM = { street: { min: 5, max: 26, at: Number(q.get('zoom') ?? 12) }, capsule: { min: 2.2, max: 7, at: 3.6 } }
 let zoom = ZOOM.street.at
@@ -111,6 +111,8 @@ const aim = (at: Vector3) => {
   viewDir.set(Math.cos(elev) * Math.sin(yaw), Math.sin(elev), Math.cos(elev) * Math.cos(yaw))
   iso.position.copy(viewDir).multiplyScalar(80).add(at)
   iso.lookAt(at)
+  // Name tags project through this camera before the frame renders.
+  iso.updateMatrixWorld()
   haze.uHzView.value.copy(viewDir)
 }
 aim(focus)
@@ -247,7 +249,7 @@ bar.append(
   timeGroup,
   segment('Weather', 'weather', WEATHERS.map((w) => [w[0]!.toUpperCase() + w.slice(1), w])),
   segment('Seams', 'seams', [['Off', false], ['On', true]]),
-  el('span', 'lab-hint', 'Drag or Q/E to turn · scroll, pinch or +/− to zoom'),
+  el('span', 'lab-hint', 'Drag, swipe sideways or hold Q/E to turn · scroll, pinch or +/− to zoom'),
 )
 document.body.append(bar)
 
@@ -265,16 +267,21 @@ const zoomBy = (k: number) => {
   const z = ZOOM[state.scene as 'street']
   zoomTarget = Math.min(z.max, Math.max(z.min, zoomTarget * k))
 }
-gl.domElement.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(Math.exp(e.deltaY * 0.0015)) }, { passive: false })
+gl.domElement.addEventListener('wheel', (e) => {
+  e.preventDefault()
+  // Trackpads: vertical swipe or pinch zooms, sideways swipe turns.
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) { if (state.scene === 'street') yawTarget = yaw = yaw + e.deltaX * 0.004 }
+  else zoomBy(Math.exp(e.deltaY * 0.0015))
+}, { passive: false })
 addEventListener('keydown', (e) => {
   if (e.key === '+' || e.key === '=') zoomBy(1 / 1.25)
   if (e.key === '-' || e.key === '_') zoomBy(1.25)
-  if (state.scene !== 'street') return
-  // Quarter turns land on the nearest diagonal, so the grid stays isometric.
-  const quarter = (d: number) => SOUTH_EAST + (Math.round((yawTarget - SOUTH_EAST) / (Math.PI / 2)) + d) * (Math.PI / 2)
-  if (e.key === 'q' || e.key === 'Q') yawTarget = quarter(-1)
-  if (e.key === 'e' || e.key === 'E') yawTarget = quarter(1)
+  turning[e.key.toLowerCase()] = true
 })
+// Q and E turn the view while held.
+const turning: Record<string, boolean> = {}
+addEventListener('keyup', (e) => { turning[e.key.toLowerCase()] = false })
+addEventListener('blur', () => { turning.q = turning.e = false })
 const touches = new Map<number, [number, number]>()
 let pinch = 0
 const spread = () => { const [a, b] = [...touches.values()]; return a && b ? Math.hypot(a[0] - b[0], a[1] - b[1]) : 0 }
@@ -309,6 +316,8 @@ gl.setAnimationLoop((ms) => {
   const dt = Math.min(0.1, (ms - (last || ms)) / 1000)
   last = ms
   if (Math.abs(zoom - zoomTarget) > 0.001) { zoom += (zoomTarget - zoom) * 0.18; frameIso() }
+  const spin = state.scene === 'street' ? Number(!!turning.e) - Number(!!turning.q) : 0
+  if (spin) yawTarget = yaw = yaw + spin * 1.6 * dt
   if (Math.abs(yaw - yawTarget) > 1e-4) yaw += (yawTarget - yaw) * 0.18
   if (yaw !== aimedYaw) { aimedYaw = yaw; aim(aimAt) }
   if (state.scene === 'street') {
