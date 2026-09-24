@@ -47,54 +47,56 @@ const CUT = /* glsl */ `
     return smoothstep(0.3, 1.8, ahead) * (1.0 - smoothstep(7.0, 10.0, across)) * (1.0 - smoothstep(30.0, 34.0, ahead));
   }`
 
+const smooth = (a: number, b: number, x: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t) }
+
+/** The cutaway's target for a spot on the ground: the same sum as CUT, in JS. */
+function cutAt(x: number, z: number): number {
+  const rx = x - focus.value.x, rz = z - focus.value.y
+  const ahead = rx * view.value.x + rz * view.value.y
+  const across = Math.abs(rx * view.value.y - rz * view.value.x)
+  return smooth(0.3, 1.8, ahead) * (1 - smooth(7, 10, across)) * (1 - smooth(30, 34, ahead))
+}
+
 /**
- * Things that stand on or hang off buildings (signs, roof kit, capsule pods)
- * vanish with the building when the cutaway takes it, instead of floating.
- * Meshes go whole, by their origin; wires (`perFragment`) are clipped where
- * they cross the cut. Wraps whatever patch the material already has.
+ * Buildings don't follow the cutaway instantly: each has its own cut that
+ * glides to the target, so a fast turn sinks them over half a second instead
+ * of snapping. Signs, pods and roof kit shrink away with the same value.
  */
-function cutHide<T extends Material>(m: T, perFragment = false): T {
+interface Cutter { x: number; z: number; cut: number; apply(cut: number): void }
+const CUT_EASE = 0.16 // seconds, time constant
+
+/** Overhead wires are clipped where they cross the cut (no easing: they're thin). */
+function cutWire<T extends Material>(m: T): T {
   const prev = m.onBeforeCompile.bind(m)
   const prevKey = m.customProgramCacheKey.bind(m)
   m.onBeforeCompile = (shader, renderer) => {
     prev(shader, renderer)
     shader.uniforms.uFocus = focus
     shader.uniforms.uView = view
-    if (perFragment) {
-      shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', `#include <common>\n${CUT}`)
-        .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\nif (cutaway(vHzW.xz) > 0.5) discard;`)
-      return
-    }
-    shader.vertexShader = shader.vertexShader
+    shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>\n${CUT}`)
-      .replace(
-        '#include <begin_vertex>',
-        `#include <begin_vertex>
-        #ifdef USE_INSTANCING
-          vec4 cutO = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-        #else
-          vec4 cutO = modelMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-        #endif
-        if (cutaway(cutO.xz) > 0.5) transformed = vec3(0.0);`,
-      )
+      .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\nif (cutaway(vHzW.xz) > 0.5) discard;`)
   }
-  m.customProgramCacheKey = () => `${prevKey()}-cut${perFragment ? 'f' : 'v'}`
+  m.customProgramCacheKey = () => `${prevKey()}-cutf`
   return m
 }
 
 /** Concrete with ribbon windows, lit at night; takes the cutaway. */
 function facade(hex: number, key: string): MeshStandardMaterial {
   const m = new MeshStandardMaterial({ color: hex, roughness: 0.9 })
+  // Each building has its own instance (three only re-uploads a built-in
+  // material's uniforms when the material changes), all sharing one program.
+  const uCut = { value: 0 }
+  m.userData.uCut = uCut
+  m.userData.concrete = [hex, key]
   return hazed(m, `facade-${key}`, (shader) => {
-    shader.uniforms.uFocus = focus
-    shader.uniforms.uView = view
+    shader.uniforms.uCut = uCut
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\nvarying vec3 vFW;\nvarying vec3 vFN;\n${CUT}`)
+      .replace('#include <common>', `#include <common>\nvarying vec3 vFW;\nvarying vec3 vFN;\nuniform float uCut;`)
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
-        float cut = cutaway(vec2(modelMatrix[3].x, modelMatrix[3].z));
+        float cut = uCut;
         transformed.y = mix(transformed.y, min(transformed.y, 0.35 - modelMatrix[3].y), cut);`,
       )
       .replace(
@@ -308,13 +310,24 @@ export function buildStreet(map: DistrictMap): Street {
 
   // Buildings: each block split into lots; each lot a podium and a tower.
   const facades = CONCRETE.map((hex, i) => facade(hex, String(i)))
-  const roofMat = cutHide(hazed(new MeshStandardMaterial({ color: 0x9c998f, roughness: 0.8 }), 'roofkit'))
+  const roofMat = hazed(new MeshStandardMaterial({ color: 0x9c998f, roughness: 0.8 }), 'roofkit')
   const heightAt = (x: number, y: number) => map.heights[y * map.width + x] ?? 1
-  const add = (geo: BufferGeometry, mat: Material, x: number, z: number, y = 0) => {
+  const cutters: Cutter[] = []
+  const add = (geo: BufferGeometry, shared: Material, x: number, z: number, y = 0) => {
+    const concrete = shared.userData.concrete as [number, string] | undefined
+    const mat = concrete ? facade(...concrete) : shared
     const m = new Mesh(geo, mat)
     m.position.set(x, y, z)
     m.castShadow = m.receiveShadow = true
     group.add(m)
+    const uCut = mat.userData.uCut as { value: number } | undefined
+    if (uCut) {
+      // Concrete sinks to a stump.
+      cutters.push({ x, z, cut: 0, apply(cut) { uCut.value = cut } })
+    } else {
+      // Kit on the building shrinks away with it.
+      cutters.push({ x, z, cut: 0, apply(cut) { const k = 1 - smooth(0.15, 0.7, cut); m.scale.setScalar(Math.max(k, 1e-4)); m.visible = k > 0.001 } })
+    }
     return m
   }
   for (const [bx0, by0, bx1, by1] of blocks(map, Tile.Building)) {
@@ -354,8 +367,8 @@ export function buildStreet(map: DistrictMap): Street {
 
   // The capsule hotel as a Nakagin-style tower: two concrete cores with
   // white pods hung off them, each with a round window.
-  const podMat = cutHide(hazed(new MeshStandardMaterial({ color: 0xe4e0d6, roughness: 0.45 }), 'pod'))
-  const portMat = cutHide(hazed(new MeshStandardMaterial({ color: 0x1c1d1f, roughness: 0.2, metalness: 0.4 }), 'port'))
+  const podMat = hazed(new MeshStandardMaterial({ color: 0xe4e0d6, roughness: 0.45 }), 'pod')
+  const portMat = hazed(new MeshStandardMaterial({ color: 0x1c1d1f, roughness: 0.2, metalness: 0.4 }), 'port')
   for (const [bx0, by0, bx1, by1] of blocks(map, Tile.Capsule)) {
     const cx = (bx0 + bx1) / 2, cz = (by0 + by1) / 2
     const floors = 8
@@ -377,27 +390,40 @@ export function buildStreet(map: DistrictMap): Street {
 
   // Blade signs sticking out from the facade.
   const neon = map.props.filter((p) => p.kind === PropKind.Neon)
-  const signMat = cutHide(hazed(new MeshBasicMaterial({ map: signTexture() }), 'sign'))
-  const glowMat = cutHide(new MeshBasicMaterial({ map: radial('rgba(255,255,255,0.9)', 'rgba(255,255,255,0)'), transparent: true, blending: AdditiveBlending, depthWrite: false }))
+  const signMat = hazed(new MeshBasicMaterial({ map: signTexture() }), 'sign')
+  const glowMat = (new MeshBasicMaterial({ map: radial('rgba(255,255,255,0.9)', 'rgba(255,255,255,0)'), transparent: true, blending: AdditiveBlending, depthWrite: false }))
   const signs = inst(roundedBox(0.07, 1.1, 0.32, 0.025), signMat, neon.length)
   const glows = inst(new PlaneGeometry(1.4, 2.2), glowMat, neon.length)
   const faces = [[0, 0.5], [-0.5, 0], [0, -0.5], [0.5, 0]] as const
   neon.forEach((p: Prop, i) => {
     const [ox, oz] = faces[p.rot]!
     tmp.position.set(p.x + ox * 0.62, Math.min(p.z * STOREY * 1.5, 3 * STOREY) + 1.0, p.y + oz * 0.62)
-    tmp.rotation.set(0, p.rot % 2 === 1 ? Math.PI / 2 : 0, 0)
-    tmp.updateMatrix()
-    signs.setMatrixAt(i, tmp.matrix)
-    tmp.rotation.set(-Math.PI / 6, Math.PI / 4, 0, 'YXZ')
-    tmp.updateMatrix()
-    glows.setMatrixAt(i, tmp.matrix)
-    tmp.rotation.set(0, 0, 0, 'XYZ')
+    const [sx, sy, sz] = [tmp.position.x, tmp.position.y, tmp.position.z]
+    const signRot = p.rot % 2 === 1 ? Math.PI / 2 : 0
+    const place = (k: number) => {
+      tmp.position.set(sx, sy, sz)
+      tmp.scale.setScalar(Math.max(k, 1e-4))
+      tmp.rotation.set(0, signRot, 0)
+      tmp.updateMatrix()
+      signs.setMatrixAt(i, tmp.matrix)
+      tmp.rotation.set(-Math.PI / 6, Math.PI / 4, 0, 'YXZ')
+      tmp.updateMatrix()
+      glows.setMatrixAt(i, tmp.matrix)
+      tmp.rotation.set(0, 0, 0, 'XYZ')
+      tmp.scale.setScalar(1)
+      signs.instanceMatrix.needsUpdate = glows.instanceMatrix.needsUpdate = true
+    }
+    place(1)
+    // Keyed to the building face the sign hangs off, not the sign itself.
+    cutters.push({ x: p.x, z: p.y, cut: 0, apply(cut) { place(1 - smooth(0.15, 0.7, cut)); streakK[i] = 1 - smooth(0.15, 0.7, cut) } })
     const hex = signHex(p)
     signs.setColorAt(i, color.setHex(hex ?? SIGN_DEAD))
     glows.setColorAt(i, color.setHex(hex ?? 0)) // additive: black glow is none
   })
   group.add(signs, glows)
   const reflect: [number, number, number, number, number][] = [] // x, z, height, colour, width
+  // Per-streak scale; the first neon.length are the signs', which go with their building.
+  const streakK: number[] = []
   neon.forEach((p) => {
     const [ox, oz] = faces[p.rot]!
     const hex = signHex(p)
@@ -511,12 +537,13 @@ export function buildStreet(map: DistrictMap): Street {
     g.fillRect(0, 0, 32, 128)
     return new CanvasTexture(c)
   })()
-  const streakMat = cutHide(new MeshBasicMaterial({ map: streakTex, transparent: true, depthWrite: false, blending: AdditiveBlending }))
+  const streakMat = (new MeshBasicMaterial({ map: streakTex, transparent: true, depthWrite: false, blending: AdditiveBlending }))
   const streaks = inst(new PlaneGeometry(1, 1).rotateX(-Math.PI / 2), streakMat, reflect.length)
   // Streaks point at the camera, so they are laid out again when it turns.
   const layStreaks = (vx: number, vz: number) => {
-    reflect.forEach(([x, z, h, , w], i) => {
-      const len = h * 0.9
+    reflect.forEach(([x, z, hh, , w], i) => {
+      const h = hh * (streakK[i] ?? 1)
+      const len = Math.max(h * 0.9, 1e-4)
       tmp.position.set(x + len * 0.5 * vx, 0.015, z + len * 0.5 * vz)
       tmp.rotation.set(0, Math.atan2(vx, vz), 0)
       tmp.scale.set(w, 1, len)
@@ -567,16 +594,28 @@ export function buildStreet(map: DistrictMap): Street {
     }
   const wireGeo = new BufferGeometry()
   wireGeo.setAttribute('position', new BufferAttribute(new Float32Array(pts), 3))
-  group.add(new LineSegments(wireGeo, cutHide(hazed(new LineBasicMaterial({ color: 0x1c1b1a }), 'wire'), true)))
+  group.add(new LineSegments(wireGeo, cutWire(hazed(new LineBasicMaterial({ color: 0x1c1b1a }), 'wire'))))
 
+  let lastT = 0
+  let lastV = [0, 0]
   return {
     group,
     update(fx, fz, night, wet, vx = Math.SQRT1_2, vz = Math.SQRT1_2) {
       focus.value.set(fx, fz)
-      if (Math.abs(vx - view.value.x) + Math.abs(vz - view.value.y) > 1e-4) {
-        view.value.set(vx, vz)
-        layStreaks(vx, vz)
+      view.value.set(vx, vz)
+      const now = performance.now() / 1000
+      const dt = Math.min(0.1, now - (lastT || now))
+      lastT = now
+      const ease = 1 - Math.exp(-dt / CUT_EASE)
+      let moved = false
+      for (const c of cutters) {
+        const t = cutAt(c.x, c.z)
+        if (Math.abs(t - c.cut) < 1e-3 && c.cut === t) continue
+        c.cut = Math.abs(t - c.cut) < 1e-3 ? t : c.cut + (t - c.cut) * ease
+        c.apply(c.cut)
+        moved = true
       }
+      if (moved || vx !== lastV[0] || vz !== lastV[1]) { layStreaks(vx, vz); lastV = [vx, vz] }
       // Signs run brighter than white at night so the bloom picks them up.
       signMat.color.setScalar(0.8 + 0.9 * night)
       glowMat.opacity = 0.12 * night
