@@ -5,3 +5,5 @@ dist/
 tools/out/
 *.log
 .DS_Store
+notes/
+notes
