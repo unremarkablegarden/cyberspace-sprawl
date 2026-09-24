@@ -13,8 +13,10 @@ enough to start (see [operations.md](operations.md) for the limits).
    - Build command: `cd ../.. && bun install && bun run build`
    - Deploy command: `npx wrangler deploy`
    - Production branch: `main`
-   - Enable preview builds for other branches. The preview command
-     (`npx wrangler preview`) gives every branch its own URL.
+   - Switch the Builds card to **Previews Base**, turn on *Builds for Preview
+     branches*, and keep the preview command `npx wrangler preview`. Then turn
+     on the **Preview** Worker URL on the Domains tab, or preview builds run
+     but publish nowhere.
 2. **Custom domain.** Already in `wrangler.jsonc` (`routes`, `custom_domain`):
    the first deploy creates the DNS record and certificate. The
    `cyberspace.online` zone must be on the same Cloudflare account, and there
@@ -31,7 +33,8 @@ Each non-`main` branch gets a preview at `<branch>.sprawl.cyberspace.online`
 (the Worker's Domains tab has `sprawl.cyberspace.online` enabled for
 Production and Preview), so the `dev` branch is always at
 `dev.sprawl.cyberspace.online`. Cloudflare issues the wildcard certificate
-after the first preview build; until then the name fails with a TLS error. **Each preview has its own empty Durable Object
+after the first preview build; until then the name fails with a TLS error.
+**Each preview has its own empty Durable Object
 storage**, so testing a branch can never touch the live world.
 Previews are public by default; put Cloudflare Access in front if that matters.
 Guest sign-in doesn't work on previews (it is localhost-only), so sign in with
