@@ -12,6 +12,7 @@ Live at **sprawl.cyberspace.online** (sign in with your cyberspace account).
 - [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
 - [Game design](docs/design.md) · [Architecture](docs/architecture.md) · [Protocol](docs/protocol.md)
 - [Contributing](docs/contributing.md) · [Deploying](docs/deploy.md) · [Operations](docs/operations.md) · [Self-hosting](docs/self-hosting.md)
+- [cyberspace API](https://api.cyberspace.online/docs.md)
 
 ## Layout
 
