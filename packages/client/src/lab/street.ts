@@ -6,9 +6,9 @@
 // of buildings. The capsule hotel is a Nakagin-style tower of pods.
 
 import {
-  AdditiveBlending, BufferAttribute, BufferGeometry, CanvasTexture, DataTexture, LineBasicMaterial, LineSegments, LinearFilter, Color, CylinderGeometry, Group, IcosahedronGeometry, InstancedMesh, Mesh,
-  MeshBasicMaterial, MeshStandardMaterial, Object3D, PlaneGeometry, SRGBColorSpace, Vector2,
-  type Material, type Texture,
+  AdditiveBlending, BufferAttribute, BufferGeometry, CanvasTexture, LineBasicMaterial, LineSegments, Color, CylinderGeometry, Group, IcosahedronGeometry, InstancedMesh, Mesh,
+  MeshBasicMaterial, MeshStandardMaterial, Object3D, PlaneGeometry, SpotLight, SRGBColorSpace, Vector2, Vector3,
+  type Material,
 } from 'three'
 import { hashString, PropKind, Tile, type DistrictMap, type Prop } from '@sprawl/shared'
 import { hazed, haze } from './haze.ts'
@@ -250,41 +250,6 @@ function radial(inner: string, outer: string): CanvasTexture {
   return new CanvasTexture(c)
 }
 
-/**
- * Ground illuminance from lamp heads 2.4 up. A shielded street lamp throws
- * its light down, roughly cos² of the angle, so E ∝ h⁵ / (d² + h²)^(5/2),
- * normalised to 1 under the lamp: a hot spot, a soft tail, dark between
- * lamps. Summed, so close pools run into each other instead of stopping at a rim.
- */
-function bakeLamps(map: DistrictMap, lamps: [number, number][]): DataTexture {
-  const P = 8 // texels per tile
-  const w = map.width * P, h = map.height * P
-  const sum = new Float32Array(w * h)
-  const H = 2.4, R = 6
-  for (const [lx, lz] of lamps) {
-    const x0 = Math.max(0, Math.floor((lx - R + 0.5) * P)), x1 = Math.min(w - 1, Math.ceil((lx + R + 0.5) * P))
-    const z0 = Math.max(0, Math.floor((lz - R + 0.5) * P)), z1 = Math.min(h - 1, Math.ceil((lz + R + 0.5) * P))
-    for (let z = z0; z <= z1; z++)
-      for (let x = x0; x <= x1; x++) {
-        const dx = (x + 0.5) / P - 0.5 - lx, dz = (z + 0.5) / P - 0.5 - lz
-        const d2 = dx * dx + dz * dz
-        if (d2 > R * R) continue
-        // Fade the last tile of the radius so the cut-off doesn't show.
-        const edge = Math.min(1, (R - Math.sqrt(d2)) / 1.5)
-        sum[z * w + x]! += (H ** 5 / (d2 + H * H) ** 2.5) * edge
-      }
-  }
-  const data = new Uint8Array(w * h * 4)
-  for (let i = 0; i < w * h; i++) {
-    data[i * 4] = Math.min(255, Math.round(255 * sum[i]!))
-    data[i * 4 + 3] = 255
-  }
-  const t = new DataTexture(data, w, h)
-  t.magFilter = t.minFilter = LinearFilter
-  t.needsUpdate = true
-  return t
-}
-
 export const blobTexture = () => radial('rgba(0,0,0,0.75)', 'rgba(0,0,0,0)')
 
 const tmp = new Object3D()
@@ -335,24 +300,7 @@ export function buildStreet(map: DistrictMap): Street {
   const outer = new Mesh(new PlaneGeometry(400, 400).rotateX(-Math.PI / 2), hazed(new MeshStandardMaterial({ color: 0x2b2c2d, roughness: 0.9 })))
   outer.position.set(map.width / 2, -0.01, map.height / 2)
   outer.receiveShadow = true
-  // Lamp light is baked into a map once the lamps are placed (below) and
-  // lights the ground by its own colour, so paving catches more than asphalt.
-  const lampLight = { uLampMap: { value: null as Texture | null }, uLamp: { value: 0 }, uLampSize: { value: new Vector2(map.width, map.height) } }
-  const groundMat = hazed(new MeshStandardMaterial({ map: paintGround(map), roughness: 0.85 }), 'ground', (shader) => {
-    Object.assign(shader.uniforms, lampLight)
-    shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', '#include <common>\nuniform sampler2D uLampMap;\nuniform float uLamp;\nuniform vec2 uLampSize;')
-      .replace(
-        'vec3 totalEmissiveRadiance = emissive;',
-        `vec3 totalEmissiveRadiance = emissive;
-        {
-          float e = texture2D(uLampMap, (vHzW.xz + 0.5) / uLampSize).r;
-          // Sodium: orange in the tail, paler where it is strongest.
-          vec3 sodium = mix(vec3(1.0, 0.55, 0.22), vec3(1.0, 0.78, 0.52), e);
-          totalEmissiveRadiance += diffuseColor.rgb * sodium * e * uLamp;
-        }`,
-      )
-  })
+  const groundMat = hazed(new MeshStandardMaterial({ map: paintGround(map), roughness: 0.85 }), 'ground')
   const ground = new Mesh(new PlaneGeometry(map.width, map.height).rotateX(-Math.PI / 2), groundMat)
   ground.position.set(map.width / 2 - 0.5, 0, map.height / 2 - 0.5)
   ground.receiveShadow = true
@@ -461,10 +409,11 @@ export function buildStreet(map: DistrictMap): Street {
   const lamps = map.props.filter((p) => p.kind === PropKind.Lamp)
   for (let y = 0; y < map.height; y++)
     for (let x = 0; x < map.width; x++)
-      if (map.tile(x, y) === Tile.Pavement && (x * 7 + y * 13) % 11 === 0 && map.walkable(x, y))
+      if (map.tile(x, y) === Tile.Pavement && (x * 7 + y * 13) % 23 === 0 && map.walkable(x, y))
         lamps.push({ x, y, kind: PropKind.Lamp, rot: 0, hue: 0, z: 0 })
   const posts = inst(new CylinderGeometry(0.022, 0.032, 2.4, 10).translate(0, 1.2, 0), hazed(new MeshStandardMaterial({ color: 0x3b3a38, roughness: 0.5, metalness: 0.3 }), 'post'), lamps.length)
-  const heads = inst(roundedBox(0.36, 0.05, 0.13, 0.02), hazed(new MeshBasicMaterial({ color: 0xffb35c }), 'lamphead'), lamps.length)
+  const headMat = hazed(new MeshBasicMaterial({ color: 0xffb35c }), 'lamphead')
+  const heads = inst(roundedBox(0.36, 0.05, 0.13, 0.02), headMat, lamps.length)
   lamps.forEach((p, i) => {
     tmp.position.set(p.x + 0.35, 0, p.y + 0.35)
     tmp.updateMatrix()
@@ -475,7 +424,38 @@ export function buildStreet(map: DistrictMap): Street {
   })
   posts.castShadow = true
   group.add(posts, heads)
-  lampLight.uLampMap.value = bakeLamps(map, lamps.map((p) => [p.x + 0.25, p.y + 0.35]))
+
+  // Real light from the lamps: a fixed pool of spotlights (a fixed count, so
+  // shaders never recompile) moved onto the lamps nearest the focus. The
+  // nearest few cast shadows. Each fades out towards the edge of the pool's
+  // reach, so a lamp handing its light to another doesn't pop.
+  const LIGHTS = 12, SHADOWED = 4, REACH = 13
+  const lampAt = lamps.map((p) => new Vector3(p.x + 0.25, 2.33, p.y + 0.35))
+  const pool = Array.from({ length: LIGHTS }, (_, i) => {
+    const l = new SpotLight(0xff9a45, 0, 9, Math.PI / 2.6, 0.75, 2)
+    if (i < SHADOWED) {
+      l.castShadow = true
+      l.shadow.mapSize.set(512, 512)
+      l.shadow.bias = -0.0008
+      l.shadow.normalBias = 0.02
+      l.shadow.camera.near = 0.2
+    }
+    group.add(l, l.target)
+    return l
+  })
+  const order = lampAt.map((_, i) => i)
+  const placeLights = (fx: number, fz: number, night: number) => {
+    const d = (i: number) => Math.hypot(lampAt[i]!.x - fx, lampAt[i]!.z - fz)
+    order.sort((a, b) => d(a) - d(b))
+    pool.forEach((l, k) => {
+      const i = order[k]
+      if (i === undefined) { l.intensity = 0; return }
+      l.position.copy(lampAt[i]!)
+      l.target.position.set(lampAt[i]!.x, 0, lampAt[i]!.z)
+      l.intensity = 30 * night * (1 - Math.min(1, Math.max(0, (d(i) - REACH + 3) / 3)))
+      l.visible = l.intensity > 0
+    })
+  }
   for (const p of lamps) reflect.push([p.x + 0.25, p.y + 0.35, 2.4, 0xffb35c, 0.34])
 
   // Vending machines, the one bright cheap thing on every corner.
@@ -600,7 +580,9 @@ export function buildStreet(map: DistrictMap): Street {
       // Signs run brighter than white at night so the bloom picks them up.
       signMat.color.setScalar(0.8 + 0.9 * night)
       glowMat.opacity = 0.12 * night
-      lampLight.uLamp.value = 1.15 * night
+      placeLights(fx, fz, night)
+      // Heads burn brighter than white at night so the bloom takes them.
+      headMat.color.setHex(0xffb35c).multiplyScalar(1 + 1.4 * night)
       haze.uNight.value = night
       streakMat.opacity = wet * (0.12 + night * 0.6)
       groundMat.color.setScalar(1 - wet * 0.22)

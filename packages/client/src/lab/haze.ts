@@ -109,14 +109,14 @@ interface Key {
 
 // Keyframes through a Chiba day. Overcast is the base; weather adjusts it.
 const KEYS: Key[] = [
-  { h: 0, haze: 0x48423c, hemiSky: 0x77716a, hemiGround: 0x2a241e, hemi: 2.1, sun: 0xb8c0cc, sunI: 0.15, night: 1 },
-  { h: 5, haze: 0x4a4a4c, hemiSky: 0x77787c, hemiGround: 0x28241f, hemi: 2.1, sun: 0xb8c0cc, sunI: 0.15, night: 1 },
+  { h: 0, haze: 0x3a3f46, hemiSky: 0x5f6873, hemiGround: 0x202328, hemi: 2.1, sun: 0xb8c0cc, sunI: 0.15, night: 1 },
+  { h: 5, haze: 0x3c4148, hemiSky: 0x626b76, hemiGround: 0x212428, hemi: 2.1, sun: 0xb8c0cc, sunI: 0.15, night: 1 },
   { h: 7, haze: 0x9a9b9c, hemiSky: 0xb9bcc0, hemiGround: 0x4a4540, hemi: 2.0, sun: 0xf2e6d4, sunI: 0.6, night: 0.2 },
   { h: 12, haze: 0xb7b8b4, hemiSky: 0xdcded9, hemiGround: 0x5a5550, hemi: 2.4, sun: 0xfff2e2, sunI: 0.9, night: 0 },
   { h: 16, haze: 0xafa89e, hemiSky: 0xd6cfc2, hemiGround: 0x5a5046, hemi: 2.2, sun: 0xffe2c0, sunI: 0.9, night: 0 },
   { h: 18, haze: 0x7d736b, hemiSky: 0x9c948d, hemiGround: 0x36302b, hemi: 1.5, sun: 0xffa35a, sunI: 1.3, night: 0.45 },
-  { h: 19.5, haze: 0x4a443e, hemiSky: 0x78726b, hemiGround: 0x2a241e, hemi: 2.1, sun: 0xb8c0cc, sunI: 0.15, night: 1 },
-  { h: 24, haze: 0x48423c, hemiSky: 0x77716a, hemiGround: 0x2a241e, hemi: 2.1, sun: 0xb8c0cc, sunI: 0.15, night: 1 },
+  { h: 19.5, haze: 0x3d4147, hemiSky: 0x646a72, hemiGround: 0x222428, hemi: 2.1, sun: 0xb8c0cc, sunI: 0.15, night: 1 },
+  { h: 24, haze: 0x3a3f46, hemiSky: 0x5f6873, hemiGround: 0x202328, hemi: 2.1, sun: 0xb8c0cc, sunI: 0.15, night: 1 },
 ]
 
 const ca = new Color(), cb = new Color()
