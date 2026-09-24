@@ -7,8 +7,8 @@
 
 import {
   AdditiveBlending, BufferAttribute, BufferGeometry, CanvasTexture, LineBasicMaterial, LineSegments, Color, CylinderGeometry, Group, IcosahedronGeometry, InstancedMesh, Mesh,
-  MeshBasicMaterial, MeshStandardMaterial, Object3D, PlaneGeometry, SpotLight, SRGBColorSpace, Vector2, Vector3,
-  type Material,
+  Matrix4, MeshBasicMaterial, MeshStandardMaterial, Object3D, PlaneGeometry, SpotLight, SRGBColorSpace, Vector2, Vector3,
+  type Material, type Texture, type WebGLProgramParametersWithUniforms,
 } from 'three'
 import { hashString, PropKind, Tile, type DistrictMap, type Prop } from '@sprawl/shared'
 import { hazed, haze } from './haze.ts'
@@ -292,17 +292,59 @@ export interface Street {
    * the unit ground direction towards the camera; the cutaway and the wet
    * streaks follow it. */
   update(focusX: number, focusZ: number, night: number, wet: number, viewX?: number, viewZ?: number): void
+  /** The wet ground's mirror: the caller renders the street from below into
+   * `uRefl` with `uReflMat` as its projection, hiding `notReflected` meanwhile. */
+  mirror: { uniforms: WetUniforms; notReflected: Object3D[] }
 }
+
+export interface WetUniforms {
+  uRefl: { value: Texture | null }
+  uReflMat: { value: Matrix4 }
+  uWet: { value: number }
+  uTime: { value: number }
+}
+
+/** Puddles, ripples and the mirror image, mixed into the ground before the haze. */
+const WET_GLSL = /* glsl */ `
+  float wHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float wNoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(wHash(i), wHash(i + vec2(1, 0)), f.x), mix(wHash(i + vec2(0, 1)), wHash(i + vec2(1, 1)), f.x), f.y);
+  }`
 
 export function buildStreet(map: DistrictMap): Street {
   const group = new Group()
   const color = new Color()
 
   // Ground: one painted plane over the district, plain asphalt beyond it.
-  const outer = new Mesh(new PlaneGeometry(400, 400).rotateX(-Math.PI / 2), hazed(new MeshStandardMaterial({ color: 0x2b2c2d, roughness: 0.9 })))
+  const wetU: WetUniforms = { uRefl: { value: null }, uReflMat: { value: new Matrix4() }, uWet: { value: 0 }, uTime: { value: 0 } }
+  const wetPatch = (shader: WebGLProgramParametersWithUniforms) => {
+    Object.assign(shader.uniforms, wetU)
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\nuniform sampler2D uRefl;\nuniform mat4 uReflMat;\nuniform float uWet, uTime;\n${WET_GLSL}`)
+      .replace(
+        '#include <fog_fragment>',
+        `if (uWet > 0.01) {
+          vec2 p = vHzW.xz;
+          // Puddles where the ground dips: a soft noise field, more of it the wetter it is.
+          float puddle = smoothstep(0.62 - 0.12 * uWet, 0.72 - 0.12 * uWet, wNoise(p * 0.55) * 0.75 + wNoise(p * 2.1) * 0.25);
+          // Raindrop rings wobble the mirror; damp asphalt blurs it more than a puddle does.
+          vec2 rip = vec2(wNoise(p * 5.0 + uTime * 1.1), wNoise(p * 5.0 - uTime * 0.9)) - 0.5;
+          vec4 rp = uReflMat * vec4(vHzW, 1.0);
+          vec2 ruv = rp.xy / rp.w + rip * mix(0.005, 0.0015, puddle);
+          vec3 mirror = texture2D(uRefl, ruv).rgb;
+          float k = uWet * mix(0.1, 0.6, puddle);
+          // Water darkens what it covers and shows the sky's glow in its place.
+          gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - 0.5 * k) + mirror * k;
+        }
+        #include <fog_fragment>`,
+      )
+  }
+  const outer = new Mesh(new PlaneGeometry(400, 400).rotateX(-Math.PI / 2), hazed(new MeshStandardMaterial({ color: 0x2b2c2d, roughness: 0.9 }), 'outer', wetPatch))
   outer.position.set(map.width / 2, -0.01, map.height / 2)
   outer.receiveShadow = true
-  const groundMat = hazed(new MeshStandardMaterial({ map: paintGround(map), roughness: 0.85 }), 'ground')
+  const groundMat = hazed(new MeshStandardMaterial({ map: paintGround(map), roughness: 0.85 }), 'ground', wetPatch)
   const ground = new Mesh(new PlaneGeometry(map.width, map.height).rotateX(-Math.PI / 2), groundMat)
   ground.position.set(map.width / 2 - 0.5, 0, map.height / 2 - 0.5)
   ground.receiveShadow = true
@@ -600,6 +642,7 @@ export function buildStreet(map: DistrictMap): Street {
   let lastV = [0, 0]
   return {
     group,
+    mirror: { uniforms: wetU, notReflected: [ground, outer, streaks] },
     update(fx, fz, night, wet, vx = Math.SQRT1_2, vz = Math.SQRT1_2) {
       focus.value.set(fx, fz)
       view.value.set(vx, vz)
@@ -624,7 +667,11 @@ export function buildStreet(map: DistrictMap): Street {
       // Heads burn brighter than white at night so the bloom takes them.
       headMat.color.setHex(0xffb35c).multiplyScalar(1 + 1.4 * night)
       haze.uNight.value = night
-      streakMat.opacity = wet * (0.12 + night * 0.6)
+      // The mirror carries most of the reflection now; streaks add the smear
+      // a light gets on rough wet asphalt.
+      streakMat.opacity = wet * (0.06 + night * 0.3)
+      wetU.uWet.value = wet
+      wetU.uTime.value = now
       groundMat.color.setScalar(1 - wet * 0.22)
       groundMat.roughness = 0.85 - wet * 0.4
     },

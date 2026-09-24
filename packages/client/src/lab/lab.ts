@@ -4,8 +4,8 @@
 // Hour and weather default to the real Japan clock and today's seeded weather.
 
 import {
-  Color, DirectionalLight, HemisphereLight, NoToneMapping, OrthographicCamera, PCFShadowMap, Scene, SRGBColorSpace,
-  Vector3, WebGLRenderer,
+  Color, DirectionalLight, HalfFloatType, HemisphereLight, Matrix4, NoToneMapping, OrthographicCamera, PCFShadowMap, Scene,
+  SRGBColorSpace, Vector3, WebGLRenderer, WebGLRenderTarget,
 } from 'three'
 import { generateDistrict } from '@sprawl/shared'
 import { districtById, START_DISTRICT } from '@sprawl/content'
@@ -123,6 +123,39 @@ const frameIso = () => {
   iso.updateProjectionMatrix()
 }
 frameIso()
+
+// ── The wet ground's mirror ─────────────────────────────────────────────
+// When it's wet the street is drawn a second time, at half size, from a
+// camera mirrored under the ground; the ground shader samples it through
+// uReflMat. Shadow maps are reused from the main pass.
+
+const reflRT = new WebGLRenderTarget(1, 1, { type: HalfFloatType })
+const setReflSize = () => reflRT.setSize(Math.ceil(innerWidth * gl.getPixelRatio() / 2), Math.ceil(innerHeight * gl.getPixelRatio() / 2))
+setReflSize()
+street.mirror.uniforms.uRefl.value = reflRT.texture
+const mirrorCam = new OrthographicCamera()
+const BIAS = new Matrix4().set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1)
+const up = new Vector3()
+function renderMirror(): void {
+  mirrorCam.copy(iso)
+  mirrorCam.position.set(iso.position.x, -iso.position.y, iso.position.z)
+  up.set(0, 1, 0).applyQuaternion(iso.quaternion)
+  mirrorCam.up.set(up.x, -up.y, up.z)
+  mirrorCam.lookAt(aimAt.x, 0, aimAt.z)
+  mirrorCam.updateMatrixWorld()
+  street.mirror.uniforms.uReflMat.value.multiplyMatrices(BIAS, mirrorCam.projectionMatrix).multiply(mirrorCam.matrixWorldInverse)
+  const hidden = [...street.mirror.notReflected, rain.mesh].filter((o) => o.visible)
+  for (const o of hidden) o.visible = false
+  const auto = gl.shadowMap.autoUpdate
+  gl.shadowMap.autoUpdate = false
+  const was = gl.getRenderTarget()
+  gl.setRenderTarget(reflRT)
+  gl.clear()
+  gl.render(streetScene, mirrorCam)
+  gl.setRenderTarget(was)
+  gl.shadowMap.autoUpdate = auto
+  for (const o of hidden) o.visible = true
+}
 
 // ── Applying the controls ────────────────────────────────────────────────
 
@@ -302,6 +335,7 @@ addEventListener('pointercancel', lift)
 addEventListener('resize', () => {
   gl.setSize(innerWidth, innerHeight)
   post.setSize(innerWidth, innerHeight)
+  setReflSize()
   frameIso()
 })
 
@@ -334,6 +368,8 @@ gl.setAnimationLoop((ms) => {
       tag.style.transform = `translate(${((v.x + 1) / 2) * innerWidth}px, ${((1 - v.y) / 2) * innerHeight}px) translate(-50%, -100%)`
     }
   }
+  // The mirror uses last frame's shadow maps, so it runs after one main pass.
+  if (state.scene === 'street' && wet > 0.05 && frames > 0) renderMirror()
   post.render(scene, iso, ms / 1000)
   if (++frames === 3) (window as unknown as { labReady: boolean }).labReady = true
 })
