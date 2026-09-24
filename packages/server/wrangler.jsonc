@@ -5,6 +5,10 @@
   "name": "cyberspace-sprawl",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
+  // Deploying creates the DNS record and certificate for this hostname. The
+  // cyberspace.online zone must be on the same Cloudflare account. If you run
+  // your own copy, change or remove this line.
+  "routes": [{ "pattern": "sprawl.cyberspace.online", "custom_domain": true }],
   "assets": {
     "directory": "../client/dist",
     "binding": "ASSETS",

@@ -4,7 +4,7 @@ Everything runs on Cloudflare's developer platform; a free account is enough.
 
 1. Fork the repo, `bun install`, `bun run build`.
 2. `cd packages/server && npx wrangler login && npx wrangler deploy`.
-3. You get `https://cyberspace-sprawl.<you>.workers.dev`.
+3. Change or remove the `routes` line in `packages/server/wrangler.jsonc` first; it claims `sprawl.cyberspace.online`. You get `https://cyberspace-sprawl.<you>.workers.dev`.
 
 ## Sign-in
 

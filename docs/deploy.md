@@ -15,9 +15,10 @@ enough to start (see [operations.md](operations.md) for the limits).
    - Production branch: `main`
    - Enable preview builds for other branches. The preview command
      (`npx wrangler preview`) gives every branch its own URL.
-2. **Custom domain.** Worker → Settings → Domains & Routes → add
-   `sprawl.cyberspace.online`. The `cyberspace.online` zone must be on the same
-   Cloudflare account.
+2. **Custom domain.** Already in `wrangler.jsonc` (`routes`, `custom_domain`):
+   the first deploy creates the DNS record and certificate. The
+   `cyberspace.online` zone must be on the same Cloudflare account, and there
+   must be no existing `sprawl` DNS record.
 3. **Check it.** `https://sprawl.cyberspace.online/api/health` should answer
    `{"ok":true,…}`, and the page should offer the cyberspace sign-in.
 
