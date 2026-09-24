@@ -4,12 +4,13 @@
 // Hour and weather default to the real Japan clock and today's seeded weather.
 
 import {
-  ACESFilmicToneMapping, Color, DirectionalLight, HemisphereLight, OrthographicCamera, PCFShadowMap, Scene,
-  SRGBColorSpace, Vector3, WebGLRenderer, type Camera, type PerspectiveCamera,
+  Color, DirectionalLight, HemisphereLight, NoToneMapping, OrthographicCamera, PCFShadowMap, Scene, SRGBColorSpace,
+  Vector3, WebGLRenderer,
 } from 'three'
 import { generateDistrict } from '@sprawl/shared'
 import { districtById, START_DISTRICT } from '@sprawl/content'
-import { haze, jstHour, setRaw, skyAt, weatherFor, type WeatherKind } from './haze.ts'
+import { haze, jstHour, skyAt, weatherFor, type WeatherKind } from './haze.ts'
+import { Post } from './post.ts'
 import { blobTexture, buildStreet } from './street.ts'
 import { buildFigure, type FigureSpec } from './figure.ts'
 import { buildCapsule } from './capsule.ts'
@@ -25,14 +26,18 @@ const state = {
 }
 
 const gl = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
-gl.setPixelRatio(Math.min(devicePixelRatio, 2))
+gl.setPixelRatio(Math.min(devicePixelRatio, 1.5))
 gl.setSize(innerWidth, innerHeight)
 gl.outputColorSpace = SRGBColorSpace
-gl.toneMapping = ACESFilmicToneMapping
+// Tone mapping and the colour-space conversion happen in the post pass.
+gl.toneMapping = NoToneMapping
 gl.shadowMap.enabled = true
+gl.localClippingEnabled = true
 gl.shadowMap.type = PCFShadowMap
 gl.domElement.className = 'lab-view'
 document.body.append(gl.domElement)
+const post = new Post(gl)
+post.setSize(innerWidth, innerHeight)
 
 // ── The street, built once; light and haze change around it ─────────────
 
@@ -50,6 +55,7 @@ sun.shadow.mapSize.set(2048, 2048)
 Object.assign(sun.shadow.camera, { left: -22, right: 22, top: 22, bottom: -22, near: 1, far: 120 })
 sun.shadow.bias = -0.0006
 sun.shadow.normalBias = 0.02
+sun.shadow.radius = 3
 sun.target.position.copy(focus)
 streetScene.add(hemi, sun, sun.target)
 
@@ -69,7 +75,7 @@ const people: [string, number, number, FigureSpec][] = [
 const tags: [HTMLElement, Vector3][] = []
 for (const [name, dx, dz, spec] of people) {
   const f = buildFigure(spec, blob)
-  f.position.set(focus.x + dx, 0.08, focus.z + dz)
+  f.position.set(focus.x + dx, 0, focus.z + dz)
   f.rotation.y = (dx * 1.7 + dz) % (Math.PI * 2)
   streetScene.add(f)
   const tag = document.createElement('div')
@@ -79,17 +85,18 @@ for (const [name, dx, dz, spec] of people) {
   tags.push([tag, new Vector3(f.position.x, f.position.y + spec.height * 1.06, f.position.z)])
 }
 
-// Isometric camera, 30° down from the south-east. Zoom is the world height of
-// the screen: wheel, pinch, or + and -.
-const ZOOM_MIN = 5, ZOOM_MAX = 26
-let zoom = Number(q.get('zoom') ?? 12)
+// Isometric camera, 30° down from the south-east, shared by street and
+// capsule. Zoom is the world height of the screen: wheel, pinch, or + and -.
+const ZOOM = { street: { min: 5, max: 26, at: Number(q.get('zoom') ?? 12) }, capsule: { min: 2.2, max: 7, at: 3.6 } }
+let zoom = ZOOM.street.at
 let zoomTarget = zoom
 const iso = new OrthographicCamera(-1, 1, 1, -1, 0.1, 400)
 const elev = (30 * Math.PI) / 180
-iso.position.set(Math.cos(elev) * Math.SQRT1_2, Math.sin(elev), Math.cos(elev) * Math.SQRT1_2).multiplyScalar(80).add(focus)
-iso.lookAt(focus)
+const viewDir = new Vector3(Math.cos(elev) * Math.SQRT1_2, Math.sin(elev), Math.cos(elev) * Math.SQRT1_2)
+const aim = (at: Vector3) => { iso.position.copy(viewDir).multiplyScalar(80).add(at); iso.lookAt(at) }
+aim(focus)
 haze.uHzFocus.value.set(focus.x, focus.z)
-haze.uHzView.value.copy(iso.position).sub(focus).normalize()
+haze.uHzView.value.copy(viewDir)
 const frameIso = () => {
   const aspect = innerWidth / innerHeight
   Object.assign(iso, { left: (-zoom * aspect) / 2, right: (zoom * aspect) / 2, top: zoom / 2, bottom: -zoom / 2 })
@@ -100,25 +107,34 @@ frameIso()
 // ── Applying the controls ────────────────────────────────────────────────
 
 let scene: Scene = streetScene
-let camera: Camera = iso
-let capsuleCam: PerspectiveCamera | null = null
 let night = 0
+let shown = 'street'
 
 function apply(): void {
   const sky = skyAt(state.hour, state.weather)
   night = sky.night
+  if (shown !== state.scene) {
+    // Each scene keeps its own zoom.
+    ZOOM[shown as 'street'].at = zoomTarget
+    shown = state.scene
+    zoom = zoomTarget = ZOOM[shown as 'street'].at
+    frameIso()
+  }
   if (state.scene === 'capsule') {
-    const c = buildCapsule(sky)
+    const c = buildCapsule(sky, blob)
     scene = c.scene
-    camera = capsuleCam = c.camera
-    capsuleCam.aspect = innerWidth / innerHeight
-    capsuleCam.updateProjectionMatrix()
+    aim(c.focus)
+    // No street haze indoors.
+    haze.uHzNear.value = 1e5
+    haze.uHzFar.value = 1e5 + 1
+    post.bloom = 0.3
   } else {
     scene = streetScene
-    camera = iso
+    aim(focus)
+    post.bloom = 0.5
     streetScene.background = new Color().setHex(sky.haze)
-    setRaw(haze.uHzColor.value, sky.haze)
-    setRaw(haze.uSeamColor.value, sky.night > 0.5 ? 0x6f7a70 : 0xe9ebe6)
+    haze.uHzColor.value.setHex(sky.haze)
+    haze.uSeamColor.value.setHex(sky.night > 0.5 ? 0x6f7a70 : 0xe9ebe6)
     haze.uHzNear.value = sky.near
     haze.uHzFar.value = sky.far
     haze.uSeams.value = state.seams ? 1 : 0
@@ -223,7 +239,10 @@ function syncControls(): void {
 
 // ── Zoom input ───────────────────────────────────────────────────────────
 
-const zoomBy = (k: number) => { zoomTarget = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoomTarget * k)) }
+const zoomBy = (k: number) => {
+  const z = ZOOM[state.scene as 'street']
+  zoomTarget = Math.min(z.max, Math.max(z.min, zoomTarget * k))
+}
 gl.domElement.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(Math.exp(e.deltaY * 0.0015)) }, { passive: false })
 addEventListener('keydown', (e) => {
   if (e.key === '+' || e.key === '=') zoomBy(1 / 1.25)
@@ -245,8 +264,8 @@ addEventListener('pointerup', lift)
 addEventListener('pointercancel', lift)
 addEventListener('resize', () => {
   gl.setSize(innerWidth, innerHeight)
+  post.setSize(innerWidth, innerHeight)
   frameIso()
-  if (capsuleCam) { capsuleCam.aspect = innerWidth / innerHeight; capsuleCam.updateProjectionMatrix() }
 })
 
 // ── Loop ─────────────────────────────────────────────────────────────────
@@ -255,8 +274,8 @@ apply()
 const v = new Vector3()
 let frames = 0
 gl.setAnimationLoop((ms) => {
+  if (Math.abs(zoom - zoomTarget) > 0.001) { zoom += (zoomTarget - zoom) * 0.18; frameIso() }
   if (state.scene === 'street') {
-    if (Math.abs(zoom - zoomTarget) > 0.001) { zoom += (zoomTarget - zoom) * 0.18; frameIso() }
     street.update(focus.x, focus.z, night)
     if (rain.mesh.visible) rain.update(ms / 1000, focus.x, focus.z)
     // Name tags fade as you pull back; from far away they are clutter.
@@ -267,6 +286,6 @@ gl.setAnimationLoop((ms) => {
       tag.style.transform = `translate(${((v.x + 1) / 2) * innerWidth}px, ${((1 - v.y) / 2) * innerHeight}px) translate(-50%, -100%)`
     }
   }
-  gl.render(scene, camera)
+  post.render(scene, iso, ms / 1000)
   if (++frames === 3) (window as unknown as { labReady: boolean }).labReady = true
 })

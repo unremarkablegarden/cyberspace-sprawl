@@ -1,81 +1,192 @@
-// Look lab: the generated district rebuilt as concrete megablocks in haze.
-// Same map as the live game; only the dressing differs.
+// Look lab: the generated district rebuilt as whole buildings on a painted
+// street. The map is the live game's; only the dressing differs. Each block of
+// building tiles becomes a few lots, each lot a podium with a tower on it,
+// rounded in plan and softened at the edges. The ground is one painted
+// texture: asphalt, kerbs, lane lines, crossings, and soft shade at the feet
+// of buildings. The capsule hotel is a Nakagin-style tower of pods.
 
 import {
-  AdditiveBlending, BoxGeometry, CanvasTexture, Color, CylinderGeometry, Group, InstancedMesh, MeshBasicMaterial,
-  MeshStandardMaterial, Object3D, PlaneGeometry, Vector2, type BufferGeometry, type Material,
+  AdditiveBlending, CanvasTexture, Color, CylinderGeometry, Group, IcosahedronGeometry, InstancedMesh, Mesh,
+  MeshBasicMaterial, MeshStandardMaterial, Object3D, PlaneGeometry, SRGBColorSpace, Vector2, type BufferGeometry,
+  type Material,
 } from 'three'
-import { hashString, PropKind, Tile, type DistrictMap } from '@sprawl/shared'
+import { hashString, PropKind, Tile, type DistrictMap, type Prop } from '@sprawl/shared'
 import { hazed, haze } from './haze.ts'
+import { roundedBox, slab } from './shapes.ts'
 
 /** World height of one storey. People are about 1.0 tall. */
 export const STOREY = 1.05
 
-const CONCRETE = [0x8a8780, 0x7c7a74, 0x6f6d68, 0x959088, 0x6a6660]
+const CONCRETE = [0x8a8780, 0x7c7a74, 0x9a968d, 0x6f6d68, 0x85817a]
 // Signs: mostly the warm Chiba set, with the odd paid-for cyan or magenta.
-const SIGN_WARM = [0xf09a3a, 0xe6dcc0, 0xa8352c, 0x8fc58a, 0xd9b45a, 0xb85a2c]
+const SIGN_WARM = [0xf09a3a, 0xe6dcc0, 0xc2412f, 0x8fc58a, 0xe0b85a, 0xd06a30]
 const SIGN_LOUD = [0x4fd6e0, 0xe04f9a]
+
+// ── Cutaway: buildings between the camera and the player drop to a low
+// podium, like the Sims' walls-down view. ──────────────────────────────────
 
 const focus = { value: new Vector2() }
 const CUT = /* glsl */ `
   uniform vec2 uFocus;
-  float cutaway(mat4 inst) {
-    vec2 rel = (inst * vec4(0.0, 0.0, 0.0, 1.0)).xz - uFocus;
+  float cutaway(vec2 pos) {
+    vec2 rel = pos - uFocus;
     float ahead = dot(rel, vec2(0.7071, 0.7071));
     float across = abs(dot(rel, vec2(0.7071, -0.7071)));
-    return smoothstep(0.2, 1.2, ahead) * (1.0 - smoothstep(7.0, 10.0, across)) * (1.0 - smoothstep(30.0, 34.0, ahead));
+    return smoothstep(0.3, 1.8, ahead) * (1.0 - smoothstep(7.0, 10.0, across)) * (1.0 - smoothstep(30.0, 34.0, ahead));
   }`
 
-const tmp = new Object3D()
-function inst(geo: BufferGeometry, mat: Material, n: number): InstancedMesh {
-  const m = new InstancedMesh(geo, mat, Math.max(1, n))
-  m.count = n
-  return m
-}
-
-/** Brutalist tower material: slab bands, rain streaks, small windows lit at night. */
-function concrete(): MeshStandardMaterial {
-  const m = new MeshStandardMaterial({ roughness: 0.93, metalness: 0 })
-  return hazed(m, 'tower', (shader) => {
+/** Concrete with ribbon windows, lit at night; takes the cutaway. */
+function facade(hex: number, key: string): MeshStandardMaterial {
+  const m = new MeshStandardMaterial({ color: hex, roughness: 0.9 })
+  return hazed(m, `facade-${key}`, (shader) => {
     shader.uniforms.uFocus = focus
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\nvarying vec3 vTW;\nvarying vec3 vTN;\n${CUT}`)
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.y *= mix(1.0, 0.05, cutaway(instanceMatrix));')
+      .replace('#include <common>', `#include <common>\nvarying vec3 vFW;\nvarying vec3 vFN;\n${CUT}`)
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        float cut = cutaway(vec2(modelMatrix[3].x, modelMatrix[3].z));
+        transformed.y = mix(transformed.y, min(transformed.y, 0.35 - modelMatrix[3].y), cut);`,
+      )
       .replace(
         '#include <project_vertex>',
         `#include <project_vertex>
-        vTW = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
-        vTN = normalize(mat3(modelMatrix * instanceMatrix) * objectNormal);`,
+        vFW = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        vFN = normalize(mat3(modelMatrix) * objectNormal);`,
       )
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vTW;\nvarying vec3 vTN;\nuniform float uNight;')
+      .replace('#include <common>', '#include <common>\nvarying vec3 vFW;\nvarying vec3 vFN;\nuniform float uNight;')
       .replace(
         'vec3 totalEmissiveRadiance = emissive;',
         `vec3 totalEmissiveRadiance = emissive;
-        float side = step(0.5, 1.0 - abs(vTN.y));
-        float along = abs(vTN.x) > 0.5 ? vTW.z : vTW.x;
-        float across = abs(vTN.x) > 0.5 ? vTW.x : vTW.z;
-        // Rain streaks run down from each slab edge.
-        float streak = fract(sin(floor(along * 9.0) * 91.7 + floor(across) * 3.1) * 4375.5);
-        float slab = fract(vTW.y / ${STOREY.toFixed(2)});
-        diffuseColor.rgb *= side > 0.5 ? mix(1.0, 0.82, streak * smoothstep(0.0, 0.7, 1.0 - slab)) : 0.9;
-        // A darker cast band at every floor slab.
-        diffuseColor.rgb *= side > 0.5 ? 1.0 - 0.18 * step(0.9, slab) : 1.0;
-        // Small deep-set windows: dark glass by day.
-        vec2 g = vec2(along * 2.0, vTW.y / ${STOREY.toFixed(2)});
-        vec2 f = fract(g);
-        // Many faces are blank concrete; windows come in patches.
-        float patchy = step(0.45, fract(sin(dot(floor(vec2(along, vTW.y) / vec2(3.0, 4.0 * ${STOREY.toFixed(2)})) + floor(across) * 3.7, vec2(41.3, 17.9))) * 9631.7));
-        float win = patchy * side * step(0.3, f.x) * step(f.x, 0.7) * step(0.35, f.y) * step(f.y, 0.7) * step(0.8, vTW.y);
-        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.13, 0.14, 0.15), win * 0.85);
-        float wh = fract(sin(dot(floor(g) + floor(across) * 7.13, vec2(12.9898, 78.233))) * 43758.5453);
         {
-          vec3 warm = vec3(1.0, 0.72, 0.42), tube = vec3(0.82, 0.9, 0.8);
-          float lit = step(0.72, wh);
-          totalEmissiveRadiance += win * lit * (wh > 0.95 ? tube : warm) * 0.9 * uNight;
+          float wall = smoothstep(0.6, 0.3, abs(vFN.y));
+          vec2 tang = normalize(vec2(-vFN.z, vFN.x) + 1e-5);
+          float along = dot(vFW.xz, tang);
+          float storey = vFW.y / ${STOREY.toFixed(2)};
+          float fy = fract(storey);
+          // Ribbon windows: a glass band in each storey, thin mullions.
+          float band = smoothstep(0.34, 0.37, fy) * smoothstep(0.83, 0.80, fy) * step(0.9, vFW.y);
+          float mull = smoothstep(0.035, 0.06, abs(fract(along * 2.2) - 0.5));
+          float glass = wall * band * mull;
+          // Dark glass by day, with a pale reflection near the top of the band.
+          vec3 glassCol = mix(vec3(0.05, 0.055, 0.06), vec3(0.24, 0.25, 0.26), smoothstep(0.55, 0.8, fy));
+          diffuseColor.rgb = mix(diffuseColor.rgb, glassCol, glass);
+          // Weathering: faint streaks under each window band.
+          float streak = fract(sin(floor(along * 7.0) * 91.7) * 4375.5);
+          diffuseColor.rgb *= 1.0 - wall * (1.0 - band) * streak * 0.14 * smoothstep(0.34, 0.0, fy);
+          // A few panes lit at night.
+          float cell = fract(sin(dot(vec2(floor(along * 0.8), floor(storey)), vec2(12.9898, 78.233))) * 43758.5453);
+          vec3 warm = vec3(1.0, 0.7, 0.4), tube = vec3(0.8, 0.9, 0.8);
+          totalEmissiveRadiance += glass * step(0.84, cell) * (cell > 0.97 ? tube : warm) * 1.1 * uNight;
+          // Roofs a touch darker.
+          diffuseColor.rgb *= mix(1.0, 0.8, 1.0 - wall);
         }`,
       )
   })
+}
+
+// ── The ground ─────────────────────────────────────────────────────────────
+
+function paintGround(map: DistrictMap): CanvasTexture {
+  const S = 24 // pixels per tile
+  const c = document.createElement('canvas')
+  c.width = map.width * S
+  c.height = map.height * S
+  const g = c.getContext('2d')!
+  const t = (x: number, y: number) => (map.inBounds(x, y) ? map.tile(x, y) : Tile.Void)
+  const road = (x: number, y: number) => t(x, y) === Tile.Road
+  const built = (x: number, y: number) => t(x, y) === Tile.Building || t(x, y) === Tile.Capsule
+
+  g.fillStyle = '#2b2c2d'
+  g.fillRect(0, 0, c.width, c.height)
+  // Pavement and plazas.
+  for (let y = 0; y < map.height; y++)
+    for (let x = 0; x < map.width; x++) {
+      const k = t(x, y)
+      if (k === Tile.Road) continue
+      g.fillStyle = k === Tile.Plaza ? '#6d6c66' : k === Tile.Door ? '#8f8570' : '#76746e'
+      g.fillRect(x * S, y * S, S, S)
+    }
+  // Paving joints.
+  g.strokeStyle = 'rgba(0,0,0,0.07)'
+  g.lineWidth = 1
+  for (let y = 0; y < map.height; y++)
+    for (let x = 0; x < map.width; x++)
+      if (!road(x, y) && !built(x, y)) {
+        g.strokeRect(x * S + 0.5, y * S + 0.5, S / 2, S / 2)
+        g.strokeRect(x * S + S / 2 + 0.5, y * S + S / 2 + 0.5, S / 2, S / 2)
+      }
+  // Kerbs: a pale edge wherever pavement meets road.
+  g.fillStyle = '#a19e96'
+  for (let y = 0; y < map.height; y++)
+    for (let x = 0; x < map.width; x++) {
+      if (road(x, y) || built(x, y)) continue
+      if (road(x, y - 1)) g.fillRect(x * S, y * S, S, 2)
+      if (road(x, y + 1)) g.fillRect(x * S, y * S + S - 2, S, 2)
+      if (road(x - 1, y)) g.fillRect(x * S, y * S, 2, S)
+      if (road(x + 1, y)) g.fillRect(x * S + S - 2, y * S, 2, S)
+    }
+  // Lane lines down two-tile streets; zebra crossings where a street meets a junction.
+  g.fillStyle = 'rgba(225,220,205,0.55)'
+  for (let y = 0; y < map.height; y++)
+    for (let x = 0; x < map.width; x++) {
+      if (!road(x, y)) continue
+      if (road(x, y + 1) && !road(x, y - 1) && !road(x, y + 2)) {
+        const junction = (xx: number) => road(xx, y - 1) || road(xx, y + 2)
+        if (junction(x + 1) || junction(x - 1)) for (let i = 0; i < 5; i++) g.fillRect(x * S + 3 + i * 4.2, y * S + 2, 2.2, S * 2 - 4)
+        else if (x % 2 === 0) g.fillRect(x * S + 3, y * S + S - 1, S - 6, 2)
+      }
+      if (road(x + 1, y) && !road(x - 1, y) && !road(x + 2, y)) {
+        const junction = (yy: number) => road(x - 1, yy) || road(x + 2, yy)
+        if (junction(y + 1) || junction(y - 1)) for (let i = 0; i < 5; i++) g.fillRect(x * S + 2, y * S + 3 + i * 4.2, S * 2 - 4, 2.2)
+        else if (y % 2 === 0) g.fillRect(x * S + S - 1, y * S + 3, 2, S - 6)
+      }
+    }
+  // Soft shade at the feet of buildings.
+  g.save()
+  g.shadowColor = 'rgba(0,0,0,0.55)'
+  g.shadowBlur = S * 0.8
+  g.fillStyle = '#000'
+  for (let y = 0; y < map.height; y++) for (let x = 0; x < map.width; x++) if (built(x, y)) g.fillRect(x * S, y * S, S, S)
+  g.restore()
+  // Wear: faint speckle so large areas don't read as flat colour.
+  let seed = 11
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647
+  for (let i = 0; i < c.width * c.height * 0.02; i++) {
+    g.fillStyle = rnd() > 0.5 ? 'rgba(255,255,255,0.035)' : 'rgba(0,0,0,0.05)'
+    g.fillRect(rnd() * c.width, rnd() * c.height, 1 + rnd() * 2, 1 + rnd() * 2)
+  }
+  const tex = new CanvasTexture(c)
+  tex.colorSpace = SRGBColorSpace
+  tex.anisotropy = 8
+  return tex
+}
+
+// ── Signs: blade signs with made-up glyphs, lit from inside ────────────────
+
+function signTexture(): CanvasTexture {
+  const c = document.createElement('canvas')
+  c.width = 64
+  c.height = 192
+  const g = c.getContext('2d')!
+  g.fillStyle = '#fff'
+  g.fillRect(0, 0, 64, 192)
+  g.fillStyle = 'rgba(20,16,12,0.85)'
+  let seed = 5
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647
+  // Four stacked characters, each a few strokes in a cell.
+  for (let ch = 0; ch < 4; ch++) {
+    const cy = 14 + ch * 44
+    for (let s = 0; s < 4 + ((rnd() * 3) | 0); s++) {
+      const x = 14 + rnd() * 30, y = cy + rnd() * 30
+      if (rnd() > 0.45) g.fillRect(x - 8, y, 16 + rnd() * 12, 4)
+      else g.fillRect(x, y - 6, 4, 14 + rnd() * 14)
+    }
+  }
+  const tex = new CanvasTexture(c)
+  tex.colorSpace = SRGBColorSpace
+  return tex
 }
 
 function radial(inner: string, outer: string): CanvasTexture {
@@ -92,6 +203,38 @@ function radial(inner: string, outer: string): CanvasTexture {
 
 export const blobTexture = () => radial('rgba(0,0,0,0.75)', 'rgba(0,0,0,0)')
 
+const tmp = new Object3D()
+function inst(geo: BufferGeometry, mat: Material, n: number): InstancedMesh {
+  const m = new InstancedMesh(geo, mat, Math.max(1, n))
+  m.count = n
+  return m
+}
+
+/** Bounding rectangles of connected groups of one tile kind. */
+function blocks(map: DistrictMap, kind: number): [number, number, number, number][] {
+  const seen = new Uint8Array(map.width * map.height)
+  const out: [number, number, number, number][] = []
+  for (let y = 0; y < map.height; y++)
+    for (let x = 0; x < map.width; x++) {
+      if (seen[y * map.width + x] || map.tile(x, y) !== kind) continue
+      let x0 = x, x1 = x, y0 = y, y1 = y
+      const stack: [number, number][] = [[x, y]]
+      seen[y * map.width + x] = 1
+      while (stack.length) {
+        const [cx, cy] = stack.pop()!
+        x0 = Math.min(x0, cx); x1 = Math.max(x1, cx); y0 = Math.min(y0, cy); y1 = Math.max(y1, cy)
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+          const nx = cx + dx, ny = cy + dy
+          if (!map.inBounds(nx, ny) || seen[ny * map.width + nx] || map.tile(nx, ny) !== kind) continue
+          seen[ny * map.width + nx] = 1
+          stack.push([nx, ny])
+        }
+      }
+      out.push([x0, y0, x1, y1])
+    }
+  return out
+}
+
 export interface Street {
   group: Group
   update(focusX: number, focusZ: number, night: number): void
@@ -101,82 +244,109 @@ export function buildStreet(map: DistrictMap): Street {
   const group = new Group()
   const color = new Color()
 
-  // Ground beyond the district, so the city fades into haze rather than stopping.
-  const ground = new InstancedMesh(new PlaneGeometry(400, 400).rotateX(-Math.PI / 2), hazed(new MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.9 })), 1)
-  tmp.position.set(map.width / 2, -0.01, map.height / 2)
-  tmp.updateMatrix()
-  ground.setMatrixAt(0, tmp.matrix)
+  // Ground: one painted plane over the district, plain asphalt beyond it.
+  const outer = new Mesh(new PlaneGeometry(400, 400).rotateX(-Math.PI / 2), hazed(new MeshStandardMaterial({ color: 0x2b2c2d, roughness: 0.9 })))
+  outer.position.set(map.width / 2, -0.01, map.height / 2)
+  outer.receiveShadow = true
+  const ground = new Mesh(
+    new PlaneGeometry(map.width, map.height).rotateX(-Math.PI / 2),
+    hazed(new MeshStandardMaterial({ map: paintGround(map), roughness: 0.85 }), 'ground'),
+  )
+  ground.position.set(map.width / 2 - 0.5, 0, map.height / 2 - 0.5)
   ground.receiveShadow = true
-  group.add(ground)
+  group.add(outer, ground)
 
-  const floors: [number, number, number][] = []
-  const towers: [number, number, number, number][] = []
-  for (let y = 0; y < map.height; y++)
-    for (let x = 0; x < map.width; x++) {
-      const t = map.tile(x, y)
-      const h = map.heights[y * map.width + x]!
-      if (t === Tile.Building || t === Tile.Capsule) towers.push([x, y, h, t])
-      else floors.push([x, y, t])
+  // Buildings: each block split into lots; each lot a podium and a tower.
+  const facades = CONCRETE.map((hex, i) => facade(hex, String(i)))
+  const roofMat = hazed(new MeshStandardMaterial({ color: 0x9c998f, roughness: 0.8 }), 'roofkit')
+  const heightAt = (x: number, y: number) => map.heights[y * map.width + x] ?? 1
+  const add = (geo: BufferGeometry, mat: Material, x: number, z: number, y = 0) => {
+    const m = new Mesh(geo, mat)
+    m.position.set(x, y, z)
+    m.castShadow = m.receiveShadow = true
+    group.add(m)
+    return m
+  }
+  for (const [bx0, by0, bx1, by1] of blocks(map, Tile.Building)) {
+    const long = bx1 - bx0 >= by1 - by0
+    const len = long ? bx1 - bx0 + 1 : by1 - by0 + 1
+    let start = 0
+    while (start < len) {
+      const h = hashString(`lot:${bx0}:${by0}:${start}`) >>> 0
+      const size = Math.min(len - start, 3 + (h % 4))
+      const [lx0, lx1, ly0, ly1] = long ? [bx0 + start, bx0 + start + size - 1, by0, by1] : [bx0, bx1, by0 + start, by0 + start + size - 1]
+      start += size
+      const w = lx1 - lx0 + 1, d = ly1 - ly0 + 1
+      const cx = (lx0 + lx1) / 2, cz = (ly0 + ly1) / 2
+      let hSum = 0
+      for (let y = ly0; y <= ly1; y++) for (let x = lx0; x <= lx1; x++) hSum += heightAt(x, y)
+      const storeys = Math.max(2, Math.round((hSum / (w * d)) * 1.5 + ((h >>> 3) % 3)))
+      const mat = facades[(h >>> 5) % facades.length]!
+      const corner = [0.08, 0.25, 0.5][(h >>> 7) % 3]!
+      const podium = Math.min(storeys, 2) * STOREY
+      add(slab(w - 0.06, d - 0.06, podium, corner * 0.5, 0.03), mat, cx, cz)
+      if (storeys > 2 && w > 1.5 && d > 1.5) {
+        const inset = 0.3 + ((h >>> 9) % 3) * 0.12
+        const tw = Math.max(1, w - inset * 2), td = Math.max(1, d - inset * 2)
+        const top = storeys * STOREY
+        add(slab(tw, td, top - podium, corner, 0.04, 10), mat, cx, cz, podium)
+        // A setback crown on the tallest.
+        const crown = storeys > 7
+        if (crown) add(slab(tw * 0.6, td * 0.6, 1.4 * STOREY, corner, 0.04, 10), mat, cx, cz, top)
+        // Roof kit: a plant box and sometimes a water tank.
+        const roofY = top + (crown ? 1.4 * STOREY : 0)
+        const kw = crown ? tw * 0.6 : tw, kd = crown ? td * 0.6 : td
+        add(roundedBox(0.35, 0.22, 0.25, 0.03), roofMat, cx - kw * 0.2, cz + kd * 0.15, roofY + 0.11)
+        if ((h >>> 11) % 2) add(new CylinderGeometry(0.16, 0.16, 0.34, 16), roofMat, cx + kw * 0.2, cz - kd * 0.15, roofY + 0.17)
+      }
     }
+  }
 
-  // Floors: asphalt roads, raised concrete pavement with a kerb.
-  const floorMat = hazed(new MeshStandardMaterial({ roughness: 0.8 }))
-  const floorMesh = inst(new BoxGeometry(1, 1, 1).translate(0, -0.5, 0), floorMat, floors.length)
-  floors.forEach(([x, y, t], i) => {
-    const raised = t === Tile.Pavement || t === Tile.Plaza || t === Tile.Door
-    tmp.position.set(x, raised ? 0.08 : 0, y)
-    tmp.updateMatrix()
-    floorMesh.setMatrixAt(i, tmp.matrix)
-    const j = ((hashString(`${x},${y}`) % 12) - 6) / 255
-    const base = t === Tile.Road ? 0x2e2f30 : t === Tile.Plaza ? 0x6e6d66 : t === Tile.Door ? 0xa0916e : 0x7a7872
-    color.setHex(base)
-    color.r += j; color.g += j; color.b += j
-    floorMesh.setColorAt(i, color)
-  })
-  floorMesh.receiveShadow = true
-  group.add(floorMesh)
+  // The capsule hotel as a Nakagin-style tower: two concrete cores with
+  // white pods hung off them, each with a round window.
+  const podMat = hazed(new MeshStandardMaterial({ color: 0xe4e0d6, roughness: 0.45 }), 'pod')
+  const portMat = hazed(new MeshStandardMaterial({ color: 0x1c1d1f, roughness: 0.2, metalness: 0.4 }), 'port')
+  for (const [bx0, by0, bx1, by1] of blocks(map, Tile.Capsule)) {
+    const cx = (bx0 + bx1) / 2, cz = (by0 + by1) / 2
+    const floors = 8
+    const cores = [cx - 1.2, cx + 1.2]
+    for (const x of cores) add(slab(0.9, 0.9, floors * 0.62 + 0.8, 0.12, 0.03), facades[3]!, x, cz)
+    const pod = roundedBox(0.72, 0.56, 0.56, 0.09)
+    const port = new CylinderGeometry(0.15, 0.15, 0.03, 20).rotateX(Math.PI / 2)
+    let n = 0
+    for (let f = 0; f < floors; f++)
+      for (const x of cores)
+        for (const [ox, oz, ry] of [[0, 0.72, 0], [0.72, 0, 1], [-0.72, 0, 1], [0, -0.72, 0]] as const) {
+          if ((hashString(`pod:${x}:${f}:${ox}:${oz}`) >>> 0) % 5 === 0) continue
+          const px = x + ox, pz = cz + oz, py = 0.5 + f * 0.62 + (n++ % 2) * 0.04
+          add(pod, podMat, px, pz, py).rotation.y = (ry * Math.PI) / 2
+          const w = add(port, portMat, px + ox * 0.51, pz + oz * 0.51, py + 0.02)
+          w.rotation.y = ry ? Math.PI / 2 : 0
+        }
+  }
 
-  // Towers, taller than the pixel version: megablocks, not shops.
-  const towerMesh = inst(new BoxGeometry(1, 1, 1).translate(0, 0.5, 0), concrete(), towers.length)
-  towers.forEach(([x, y, h, t], i) => {
-    tmp.position.set(x, 0, y)
-    const storeys = t === Tile.Capsule ? 5 : Math.round(h * 1.5)
-    tmp.scale.set(1, Math.max(1, storeys) * STOREY, 1)
-    tmp.updateMatrix()
-    towerMesh.setMatrixAt(i, tmp.matrix)
-    const lot = hashString(`lot:${Math.floor(x / 3)}:${Math.floor(y / 3)}`)
-    color.setHex(t === Tile.Capsule ? 0xd8d4ca : CONCRETE[lot % CONCRETE.length]!)
-    towerMesh.setColorAt(i, color)
-  })
-  tmp.scale.set(1, 1, 1)
-  towerMesh.castShadow = true
-  towerMesh.receiveShadow = true
-  group.add(towerMesh)
-
-  // Blade signs sticking out from the facade, Tokyo-style.
+  // Blade signs sticking out from the facade.
   const neon = map.props.filter((p) => p.kind === PropKind.Neon)
-  const signMat = hazed(new MeshBasicMaterial(), 'sign')
-  const glowMat = new MeshBasicMaterial({ map: radial('rgba(255,255,255,0.9)', 'rgba(255,255,255,0)'), transparent: true, blending: AdditiveBlending, depthWrite: false, opacity: 0.2 })
-  const signs = inst(new BoxGeometry(0.08, 1.1, 0.34), signMat, neon.length)
-  const glows = inst(new PlaneGeometry(1.6, 2.4), glowMat, neon.length)
+  const signMat = hazed(new MeshBasicMaterial({ map: signTexture() }), 'sign')
+  const glowMat = new MeshBasicMaterial({ map: radial('rgba(255,255,255,0.9)', 'rgba(255,255,255,0)'), transparent: true, blending: AdditiveBlending, depthWrite: false })
+  const signs = inst(roundedBox(0.07, 1.1, 0.32, 0.025), signMat, neon.length)
+  const glows = inst(new PlaneGeometry(1.4, 2.2), glowMat, neon.length)
   const faces = [[0, 0.5], [-0.5, 0], [0, -0.5], [0.5, 0]] as const
-  neon.forEach((p, i) => {
+  neon.forEach((p: Prop, i) => {
     const [ox, oz] = faces[p.rot]!
-    const alongX = p.rot % 2 === 1
-    tmp.position.set(p.x + ox * 0.66, p.z * STOREY * 1.5 + 0.9, p.y + oz * 0.66)
-    tmp.rotation.set(0, alongX ? Math.PI / 2 : 0, 0)
+    tmp.position.set(p.x + ox * 0.62, Math.min(p.z * STOREY * 1.5, 3 * STOREY) + 1.0, p.y + oz * 0.62)
+    tmp.rotation.set(0, p.rot % 2 === 1 ? Math.PI / 2 : 0, 0)
     tmp.updateMatrix()
     signs.setMatrixAt(i, tmp.matrix)
     tmp.rotation.set(-Math.PI / 6, Math.PI / 4, 0, 'YXZ')
     tmp.updateMatrix()
     glows.setMatrixAt(i, tmp.matrix)
     tmp.rotation.set(0, 0, 0, 'XYZ')
-    const r = hashString(`sign:${p.x}:${p.y}`) % 100
+    const r = (hashString(`sign:${p.x}:${p.y}`) >>> 0) % 100
     const hex = r < 6 ? SIGN_LOUD[r % 2]! : SIGN_WARM[p.hue % SIGN_WARM.length]!
     signs.setColorAt(i, color.setHex(hex))
     glows.setColorAt(i, color.setHex(hex))
   })
-  tmp.rotation.set(0, 0, 0)
   group.add(signs, glows)
 
   // Sodium lamps with a pool of light on the ground.
@@ -185,18 +355,18 @@ export function buildStreet(map: DistrictMap): Street {
     for (let x = 0; x < map.width; x++)
       if (map.tile(x, y) === Tile.Pavement && (x * 7 + y * 13) % 11 === 0 && map.walkable(x, y))
         lamps.push({ x, y, kind: PropKind.Lamp, rot: 0, hue: 0, z: 0 })
-  const posts = inst(new CylinderGeometry(0.025, 0.035, 2.4, 6).translate(0, 1.2, 0), hazed(new MeshStandardMaterial({ color: 0x3b3a38, roughness: 0.6 })), lamps.length)
-  const heads = inst(new BoxGeometry(0.35, 0.06, 0.14), hazed(new MeshBasicMaterial({ color: 0xffb35c }), 'lamphead'), lamps.length)
-  const poolMat = new MeshBasicMaterial({ map: radial('rgba(255,170,80,0.55)', 'rgba(255,170,80,0)'), transparent: true, depthWrite: false, blending: AdditiveBlending })
+  const posts = inst(new CylinderGeometry(0.022, 0.032, 2.4, 10).translate(0, 1.2, 0), hazed(new MeshStandardMaterial({ color: 0x3b3a38, roughness: 0.5, metalness: 0.3 }), 'post'), lamps.length)
+  const heads = inst(roundedBox(0.36, 0.05, 0.13, 0.02), hazed(new MeshBasicMaterial({ color: 0xffb35c }), 'lamphead'), lamps.length)
+  const poolMat = new MeshBasicMaterial({ map: radial('rgba(255,170,80,0.5)', 'rgba(255,170,80,0)'), transparent: true, depthWrite: false, blending: AdditiveBlending })
   const pools = inst(new PlaneGeometry(3.4, 3.4).rotateX(-Math.PI / 2), poolMat, lamps.length)
   lamps.forEach((p, i) => {
-    tmp.position.set(p.x + 0.35, 0.08, p.y + 0.35)
+    tmp.position.set(p.x + 0.35, 0, p.y + 0.35)
     tmp.updateMatrix()
     posts.setMatrixAt(i, tmp.matrix)
     tmp.position.set(p.x + 0.25, 2.4, p.y + 0.35)
     tmp.updateMatrix()
     heads.setMatrixAt(i, tmp.matrix)
-    tmp.position.set(p.x + 0.25, 0.1, p.y + 0.35)
+    tmp.position.set(p.x + 0.25, 0.01, p.y + 0.35)
     tmp.updateMatrix()
     pools.setMatrixAt(i, tmp.matrix)
   })
@@ -205,30 +375,31 @@ export function buildStreet(map: DistrictMap): Street {
 
   // Vending machines, the one bright cheap thing on every corner.
   const vend = map.props.filter((p) => p.kind === PropKind.Vending)
-  const bodies = inst(new BoxGeometry(0.6, 1.3, 0.5).translate(0, 0.73, 0), hazed(new MeshStandardMaterial({ color: 0xc9c4b8, roughness: 0.5 })), vend.length)
-  const panels = inst(new BoxGeometry(0.46, 0.8, 0.02).translate(0, 0.85, 0.26), hazed(new MeshBasicMaterial(), 'panel'), vend.length)
+  const bodies = inst(roundedBox(0.6, 1.3, 0.5, 0.05).translate(0, 0.65, 0), hazed(new MeshStandardMaterial({ color: 0xc9c4b8, roughness: 0.4 }), 'vend'), vend.length)
+  const panels = inst(roundedBox(0.46, 0.8, 0.02, 0.008).translate(0, 0.8, 0.255), hazed(new MeshBasicMaterial({ color: 0xe8e4d8 }), 'panel'), vend.length)
   vend.forEach((p, i) => {
-    tmp.position.set(p.x, 0.08, p.y)
+    tmp.position.set(p.x, 0, p.y)
     tmp.rotation.set(0, (p.rot * Math.PI) / 2, 0)
     tmp.updateMatrix()
     bodies.setMatrixAt(i, tmp.matrix)
     panels.setMatrixAt(i, tmp.matrix)
-    panels.setColorAt(i, color.setHex(0xe8e4d8))
   })
   tmp.rotation.set(0, 0, 0)
   bodies.castShadow = true
   group.add(bodies, panels)
 
-  // Plaza trees, pale and pruned.
+  // Plaza trees: dark trunks, soft round crowns.
   const trees = map.props.filter((p) => p.kind === PropKind.Bonsai)
-  const trunks = inst(new CylinderGeometry(0.04, 0.07, 0.9, 6).translate(0, 0.45, 0), hazed(new MeshStandardMaterial({ color: 0x3e3129 })), trees.length)
-  const crowns = inst(new BoxGeometry(0.7, 0.35, 0.7).translate(0, 1.0, 0), hazed(new MeshStandardMaterial({ color: 0x55603f, roughness: 1 })), trees.length)
+  const trunks = inst(new CylinderGeometry(0.035, 0.06, 1.0, 8).translate(0, 0.5, 0), hazed(new MeshStandardMaterial({ color: 0x5a4a3c }), 'trunk'), trees.length)
+  const crowns = inst(new IcosahedronGeometry(0.42, 2).scale(1, 0.8, 1).translate(0, 1.15, 0), hazed(new MeshStandardMaterial({ color: 0x5d6b47, roughness: 1 }), 'crown'), trees.length)
   trees.forEach((p, i) => {
-    tmp.position.set(p.x, 0.08, p.y)
+    tmp.position.set(p.x, 0, p.y)
+    tmp.scale.setScalar(0.85 + ((hashString(`t${p.x}:${p.y}`) >>> 0) % 30) / 100)
     tmp.updateMatrix()
     trunks.setMatrixAt(i, tmp.matrix)
     crowns.setMatrixAt(i, tmp.matrix)
   })
+  tmp.scale.setScalar(1)
   trunks.castShadow = crowns.castShadow = true
   group.add(trunks, crowns)
 
@@ -236,8 +407,9 @@ export function buildStreet(map: DistrictMap): Street {
     group,
     update(fx, fz, night) {
       focus.value.set(fx, fz)
-      signMat.color.setScalar(0.55 + 0.45 * night)
-      glowMat.opacity = 0.45 * night
+      // Signs run brighter than white at night so the bloom picks them up.
+      signMat.color.setScalar(0.8 + 0.9 * night)
+      glowMat.opacity = 0.12 * night
       poolMat.opacity = night
       haze.uNight.value = night
     },

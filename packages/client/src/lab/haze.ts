@@ -18,11 +18,6 @@ export const haze = {
   uNight: { value: 0 },
 }
 
-/** Set a colour uniform from an sRGB hex as-is (fog runs after the colour-space conversion). */
-export function setRaw(c: Color, hex: number): void {
-  c.setHex(hex, LinearSRGBColorSpace)
-}
-
 const VERT_HEAD = /* glsl */ `varying vec3 vHzW;`
 const VERT_BODY = /* glsl */ `
   {
