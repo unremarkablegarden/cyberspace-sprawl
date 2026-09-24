@@ -5,7 +5,7 @@
 
 import {
   AdditiveBlending, CanvasTexture, CylinderGeometry, Group, Mesh, MeshBasicMaterial, MeshStandardMaterial,
-  NormalBlending, PlaneGeometry, Sprite, SpriteMaterial, Vector3, type Texture,
+  NormalBlending, PlaneGeometry, SpotLight, Sprite, SpriteMaterial, Vector3, type Texture,
 } from 'three'
 import { findPath, hashString, Tile, type DistrictMap, type XY } from '@sprawl/shared'
 import { animateWalk, buildFigure, type FigureSpec, type Rig } from './figure.ts'
@@ -204,6 +204,17 @@ export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture): Life
     cars.push({ root, axis: lane.axis, dir: lane.dir, lane: lane.at, pos: rnd() * map.width, speed: 2 + rnd() * 1.5, beams })
   }
 
+  // Real headlights on the cars nearest the focus: a fixed pool (constant
+  // light count, so no shader recompiles), faded out towards its reach.
+  const HEADLIGHTS = 4, REACH = 12
+  const headlights = Array.from({ length: HEADLIGHTS }, () => {
+    const l = new SpotLight(0xfff0d8, 0, 8, 0.42, 0.55, 2)
+    group.add(l, l.target)
+    return l
+  })
+  const byDistance = cars.map((_, i) => i)
+  const carDist = (c: Car) => Math.hypot(c.root.position.x - focus.x, c.root.position.z - focus.z)
+
   // Steam from a few grates in the road near the player.
   const puffTex = puffTexture()
   const puffs: { s: Sprite; base: Vector3; t0: number }[] = []
@@ -265,9 +276,20 @@ export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture): Life
         if (c.pos < -6) c.pos = len + 6
         if (c.axis === 'x') c.root.position.set(c.pos, 0, c.lane)
         else c.root.position.set(c.lane, 0, c.pos)
-        ;(c.beams.material as MeshBasicMaterial).opacity = night * 0.28
+        // The real light does the lighting; the beam is only the glow in the haze.
+        ;(c.beams.material as MeshBasicMaterial).opacity = night * 0.12
         c.beams.visible = night > 0.05
       }
+      byDistance.sort((a, b) => carDist(cars[a]!) - carDist(cars[b]!))
+      headlights.forEach((l, k) => {
+        const c = cars[byDistance[k]!]
+        if (!c || night < 0.05) { l.intensity = 0; l.visible = false; return }
+        c.root.updateMatrixWorld()
+        c.root.localToWorld(l.position.set(0.5, 0.18, 0))
+        c.root.localToWorld(l.target.position.set(4, 0, 0))
+        l.intensity = 22 * night * (1 - Math.min(1, Math.max(0, (carDist(c) - REACH + 3) / 3)))
+        l.visible = l.intensity > 0
+      })
 
       for (const p of puffs) {
         const t = (time * 0.25 + p.t0) % 1

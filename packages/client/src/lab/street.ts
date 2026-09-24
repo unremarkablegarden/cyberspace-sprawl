@@ -606,7 +606,8 @@ export function buildStreet(map: DistrictMap): Street {
       const now = performance.now() / 1000
       const dt = Math.min(0.1, now - (lastT || now))
       lastT = now
-      const ease = 1 - Math.exp(-dt / CUT_EASE)
+      // The first frame lands where it should be; after that, glide.
+      const ease = dt > 0 ? 1 - Math.exp(-dt / CUT_EASE) : 1
       let moved = false
       for (const c of cutters) {
         const t = cutAt(c.x, c.z)
