@@ -92,18 +92,29 @@ for (const [name, dx, dz, spec] of people) {
 const life = buildLife(map, focus, blob)
 streetScene.add(life.group)
 
-// Isometric camera, 30° down from the south-east, shared by street and
-// capsule. Zoom is the world height of the screen: wheel, pinch, or + and -.
+// Isometric camera, 30° down, shared by street and capsule. Zoom is the world
+// height of the screen: wheel, pinch, or + and -. On the street it also turns:
+// drag, or Q and E for quarter turns. The capsule stays on the south-east,
+// where its cut-open side faces.
 const ZOOM = { street: { min: 5, max: 26, at: Number(q.get('zoom') ?? 12) }, capsule: { min: 2.2, max: 7, at: 3.6 } }
 let zoom = ZOOM.street.at
 let zoomTarget = zoom
 const iso = new OrthographicCamera(-1, 1, 1, -1, 0.1, 400)
 const elev = (30 * Math.PI) / 180
-const viewDir = new Vector3(Math.cos(elev) * Math.SQRT1_2, Math.sin(elev), Math.cos(elev) * Math.SQRT1_2)
-const aim = (at: Vector3) => { iso.position.copy(viewDir).multiplyScalar(80).add(at); iso.lookAt(at) }
+const SOUTH_EAST = Math.PI / 4
+let yaw = SOUTH_EAST
+let yawTarget = SOUTH_EAST
+const viewDir = new Vector3()
+const aimAt = focus.clone()
+const aim = (at: Vector3) => {
+  aimAt.copy(at)
+  viewDir.set(Math.cos(elev) * Math.sin(yaw), Math.sin(elev), Math.cos(elev) * Math.cos(yaw))
+  iso.position.copy(viewDir).multiplyScalar(80).add(at)
+  iso.lookAt(at)
+  haze.uHzView.value.copy(viewDir)
+}
 aim(focus)
 haze.uHzFocus.value.set(focus.x, focus.z)
-haze.uHzView.value.copy(viewDir)
 const frameIso = () => {
   const aspect = innerWidth / innerHeight
   Object.assign(iso, { left: (-zoom * aspect) / 2, right: (zoom * aspect) / 2, top: zoom / 2, bottom: -zoom / 2 })
@@ -131,6 +142,7 @@ function apply(): void {
     frameIso()
   }
   if (state.scene === 'capsule') {
+    yaw = yawTarget = SOUTH_EAST
     const c = buildCapsule(sky, blob)
     scene = c.scene
     aim(c.focus)
@@ -235,7 +247,7 @@ bar.append(
   timeGroup,
   segment('Weather', 'weather', WEATHERS.map((w) => [w[0]!.toUpperCase() + w.slice(1), w])),
   segment('Seams', 'seams', [['Off', false], ['On', true]]),
-  el('span', 'lab-hint', 'Scroll, pinch or +/− to zoom'),
+  el('span', 'lab-hint', 'Drag or Q/E to turn · scroll, pinch or +/− to zoom'),
 )
 document.body.append(bar)
 
@@ -257,6 +269,11 @@ gl.domElement.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(Math
 addEventListener('keydown', (e) => {
   if (e.key === '+' || e.key === '=') zoomBy(1 / 1.25)
   if (e.key === '-' || e.key === '_') zoomBy(1.25)
+  if (state.scene !== 'street') return
+  // Quarter turns land on the nearest diagonal, so the grid stays isometric.
+  const quarter = (d: number) => SOUTH_EAST + (Math.round((yawTarget - SOUTH_EAST) / (Math.PI / 2)) + d) * (Math.PI / 2)
+  if (e.key === 'q' || e.key === 'Q') yawTarget = quarter(-1)
+  if (e.key === 'e' || e.key === 'E') yawTarget = quarter(1)
 })
 const touches = new Map<number, [number, number]>()
 let pinch = 0
@@ -264,7 +281,10 @@ const spread = () => { const [a, b] = [...touches.values()]; return a && b ? Mat
 gl.domElement.addEventListener('pointerdown', (e) => { touches.set(e.pointerId, [e.clientX, e.clientY]); pinch = spread() })
 addEventListener('pointermove', (e) => {
   if (!touches.has(e.pointerId)) return
+  const [px] = touches.get(e.pointerId)!
   touches.set(e.pointerId, [e.clientX, e.clientY])
+  // One pointer drags the view round; two pinch.
+  if (touches.size === 1 && state.scene === 'street') yawTarget = yaw = yaw - (e.clientX - px) * 0.008
   const d = spread()
   if (pinch && d) zoomBy(pinch / d)
   pinch = d
@@ -283,13 +303,17 @@ addEventListener('resize', () => {
 apply()
 const v = new Vector3()
 let frames = 0
+let aimedYaw = yaw
 let last = 0
 gl.setAnimationLoop((ms) => {
   const dt = Math.min(0.1, (ms - (last || ms)) / 1000)
   last = ms
   if (Math.abs(zoom - zoomTarget) > 0.001) { zoom += (zoomTarget - zoom) * 0.18; frameIso() }
+  if (Math.abs(yaw - yawTarget) > 1e-4) yaw += (yawTarget - yaw) * 0.18
+  if (yaw !== aimedYaw) { aimedYaw = yaw; aim(aimAt) }
   if (state.scene === 'street') {
-    street.update(focus.x, focus.z, night, wet)
+    const flat = Math.hypot(viewDir.x, viewDir.z)
+    street.update(focus.x, focus.z, night, wet, viewDir.x / flat, viewDir.z / flat)
     life.update(ms / 1000, dt, night)
     cast.forEach((r, i) => animateWalk(r, i * 1.7, 0, ms / 1000))
     if (rain.mesh.visible) rain.update(ms / 1000, focus.x, focus.z)

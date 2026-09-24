@@ -18,20 +18,32 @@ import { roundedBox, slab } from './shapes.ts'
 export const STOREY = 1.05
 
 const CONCRETE = [0x8a8780, 0x7c7a74, 0x9a968d, 0x6f6d68, 0x85817a]
-// Signs: mostly the warm Chiba set, with the odd paid-for cyan or magenta.
-const SIGN_WARM = [0xf09a3a, 0xe6dcc0, 0xc2412f, 0x8fc58a, 0xe0b85a, 0xd06a30]
+// Signs: a muted warm Chiba set, the odd paid-for cyan or magenta, and about a
+// third dead, because nobody paid that month.
+const SIGN_WARM = [0xd89a4a, 0xd8d0b8, 0x9c4a38, 0x8fa88a, 0xc8a860, 0xb87a48]
 const SIGN_LOUD = [0x4fd6e0, 0xe04f9a]
+const SIGN_DEAD = 0x2a2826
+
+/** Sign colour for a spot, or null when the sign is dead (unlit). */
+function signHex(p: Prop): number | null {
+  const r = (hashString(`sign:${p.x}:${p.y}`) >>> 0) % 100
+  if (r < 5) return SIGN_LOUD[r % 2]!
+  if (r >= 66) return null
+  return SIGN_WARM[p.hue % SIGN_WARM.length]!
+}
 
 // ── Cutaway: buildings between the camera and the player drop to a low
 // podium, like the Sims' walls-down view. ──────────────────────────────────
 
 const focus = { value: new Vector2() }
+/** Ground-plane direction from the focus towards the camera. */
+const view = { value: new Vector2(Math.SQRT1_2, Math.SQRT1_2) }
 const CUT = /* glsl */ `
-  uniform vec2 uFocus;
+  uniform vec2 uFocus, uView;
   float cutaway(vec2 pos) {
     vec2 rel = pos - uFocus;
-    float ahead = dot(rel, vec2(0.7071, 0.7071));
-    float across = abs(dot(rel, vec2(0.7071, -0.7071)));
+    float ahead = dot(rel, uView);
+    float across = abs(dot(rel, vec2(uView.y, -uView.x)));
     return smoothstep(0.3, 1.8, ahead) * (1.0 - smoothstep(7.0, 10.0, across)) * (1.0 - smoothstep(30.0, 34.0, ahead));
   }`
 
@@ -40,6 +52,7 @@ function facade(hex: number, key: string): MeshStandardMaterial {
   const m = new MeshStandardMaterial({ color: hex, roughness: 0.9 })
   return hazed(m, `facade-${key}`, (shader) => {
     shader.uniforms.uFocus = focus
+    shader.uniforms.uView = view
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>\nvarying vec3 vFW;\nvarying vec3 vFN;\n${CUT}`)
       .replace(
@@ -237,8 +250,10 @@ function blocks(map: DistrictMap, kind: number): [number, number, number, number
 
 export interface Street {
   group: Group
-  /** `wet` is 0 dry to 1 soaked: reflections on the ground. */
-  update(focusX: number, focusZ: number, night: number, wet: number): void
+  /** `wet` is 0 dry to 1 soaked: reflections on the ground. (viewX, viewZ) is
+   * the unit ground direction towards the camera; the cutaway and the wet
+   * streaks follow it. */
+  update(focusX: number, focusZ: number, night: number, wet: number, viewX?: number, viewZ?: number): void
 }
 
 export function buildStreet(map: DistrictMap): Street {
@@ -341,17 +356,16 @@ export function buildStreet(map: DistrictMap): Street {
     tmp.updateMatrix()
     glows.setMatrixAt(i, tmp.matrix)
     tmp.rotation.set(0, 0, 0, 'XYZ')
-    const r = (hashString(`sign:${p.x}:${p.y}`) >>> 0) % 100
-    const hex = r < 6 ? SIGN_LOUD[r % 2]! : SIGN_WARM[p.hue % SIGN_WARM.length]!
-    signs.setColorAt(i, color.setHex(hex))
-    glows.setColorAt(i, color.setHex(hex))
+    const hex = signHex(p)
+    signs.setColorAt(i, color.setHex(hex ?? SIGN_DEAD))
+    glows.setColorAt(i, color.setHex(hex ?? 0)) // additive: black glow is none
   })
   group.add(signs, glows)
   const reflect: [number, number, number, number, number][] = [] // x, z, height, colour, width
   neon.forEach((p) => {
     const [ox, oz] = faces[p.rot]!
-    const r = (hashString(`sign:${p.x}:${p.y}`) >>> 0) % 100
-    const hex = r < 6 ? SIGN_LOUD[r % 2]! : SIGN_WARM[p.hue % SIGN_WARM.length]!
+    const hex = signHex(p)
+    if (hex === null) return
     reflect.push([p.x + ox * 0.62, p.y + oz * 0.62, Math.min(p.z * STOREY * 1.5, 3 * STOREY) + 1.0, hex, 0.3])
   })
 
@@ -435,17 +449,22 @@ export function buildStreet(map: DistrictMap): Street {
   })()
   const streakMat = new MeshBasicMaterial({ map: streakTex, transparent: true, depthWrite: false, blending: AdditiveBlending })
   const streaks = inst(new PlaneGeometry(1, 1).rotateX(-Math.PI / 2), streakMat, reflect.length)
-  reflect.forEach(([x, z, h, hex, w], i) => {
-    const len = h * 0.9
-    tmp.position.set(x + len * 0.3536, 0.015, z + len * 0.3536)
-    tmp.rotation.set(0, Math.PI / 4, 0)
-    tmp.scale.set(w, 1, len)
-    tmp.updateMatrix()
-    streaks.setMatrixAt(i, tmp.matrix)
-    streaks.setColorAt(i, color.setHex(hex))
-  })
-  tmp.rotation.set(0, 0, 0)
-  tmp.scale.set(1, 1, 1)
+  // Streaks point at the camera, so they are laid out again when it turns.
+  const layStreaks = (vx: number, vz: number) => {
+    reflect.forEach(([x, z, h, , w], i) => {
+      const len = h * 0.9
+      tmp.position.set(x + len * 0.5 * vx, 0.015, z + len * 0.5 * vz)
+      tmp.rotation.set(0, Math.atan2(vx, vz), 0)
+      tmp.scale.set(w, 1, len)
+      tmp.updateMatrix()
+      streaks.setMatrixAt(i, tmp.matrix)
+    })
+    streaks.instanceMatrix.needsUpdate = true
+    tmp.rotation.set(0, 0, 0)
+    tmp.scale.set(1, 1, 1)
+  }
+  reflect.forEach(([, , , hex], i) => streaks.setColorAt(i, color.setHex(hex)))
+  layStreaks(view.value.x, view.value.y)
   streaks.renderOrder = 2
   group.add(streaks)
 
@@ -488,8 +507,12 @@ export function buildStreet(map: DistrictMap): Street {
 
   return {
     group,
-    update(fx, fz, night, wet) {
+    update(fx, fz, night, wet, vx = Math.SQRT1_2, vz = Math.SQRT1_2) {
       focus.value.set(fx, fz)
+      if (Math.abs(vx - view.value.x) + Math.abs(vz - view.value.y) > 1e-4) {
+        view.value.set(vx, vz)
+        layStreaks(vx, vz)
+      }
       // Signs run brighter than white at night so the bloom picks them up.
       signMat.color.setScalar(0.8 + 0.9 * night)
       glowMat.opacity = 0.12 * night
