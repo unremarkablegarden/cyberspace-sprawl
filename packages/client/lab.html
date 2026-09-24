@@ -2,18 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Sprawl look lab</title>
     <style>
-      html, body { margin: 0; height: 100%; overflow: hidden; background: #111; touch-action: none; }
-      canvas { display: block; }
-      #label, .tag { position: fixed; font: 500 11px/1 "Helvetica Neue", Helvetica, Arial, sans-serif; letter-spacing: 0.12em; text-transform: uppercase; }
-      #label { left: 16px; bottom: 14px; color: rgba(235, 230, 218, 0.8); }
-      .tag { left: 0; top: 0; padding: 3px 6px 2px; color: #ece6d8; background: rgba(20, 20, 20, 0.55); pointer-events: none; white-space: nowrap; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #111110; touch-action: none; }
     </style>
   </head>
   <body>
-    <div id="label"></div>
     <script type="module" src="/src/lab/lab.ts"></script>
   </body>
 </html>
