@@ -140,7 +140,7 @@ export function buildCharacter(spec: AvatarSpec): Character {
   // Accessories.
   switch (accessory) {
     case 'mirrorshades':
-      body.add(part(box(0.25, 0.06, 0.02), glow(0x9fb4c8), 0, headY + 0.02, 0.115))
+      body.add(part(box(0.25, 0.06, 0.02), glow(0x9a9890), 0, headY + 0.02, 0.115))
       break
     case 'visor':
       body.add(part(box(0.26, 0.05, 0.02), accent, 0, headY + 0.02, 0.115))

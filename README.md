@@ -1,7 +1,7 @@
 # The Sprawl
 
 A multiplayer city for [cyberspace](https://cyberspace.online) members. Walk the
-neon streets of Chiba, talk to whoever is out, dress your character. Soon:
+wet streets of Chiba, talk to whoever is out, dress your character. Soon:
 scavenge, craft, trade and build a home, in a world that never resets.
 
 Think Animal Crossing's daily rhythm, set in William Gibson's Sprawl, drawn as

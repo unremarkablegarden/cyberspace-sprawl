@@ -45,8 +45,14 @@ never by resetting.
 
 Low-poly 3D seen through a fixed isometric camera and drawn at a third of screen
 resolution, then scaled up with hard pixel edges and a slight colour banding.
-Night, rain, neon. The camera is real 3D, so interiors or first person can come
-later without new art.
+The camera is real 3D, so interiors or first person can come later without new
+art.
+
+The palette is Gibson's 1984 Chiba, not a 2020s game's: a sky the grey of a
+dead television channel, wet concrete, rust, sodium streetlight, tungsten behind
+dirty windows, cream and oxblood signage, the green of an old phosphor screen.
+**No cyan-and-magenta neon**, no purple haze, no glowing everything. Light
+should feel scarce and warm against a cold grey city.
 
 ## Characters
 

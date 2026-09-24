@@ -61,7 +61,7 @@ export class Game {
 
     this.#cursor = new Mesh(
       new PlaneGeometry(0.96, 0.96).rotateX(-Math.PI / 2),
-      new MeshBasicMaterial({ color: 0x2ef2ff, transparent: true, opacity: 0.25 }),
+      new MeshBasicMaterial({ color: 0xf09a3a, transparent: true, opacity: 0.25 }),
     )
     this.#cursor.position.y = 0.01
     this.renderer.scene.add(this.#cursor)

@@ -137,11 +137,12 @@ function windowMaterial(): MeshLambertMaterial {
           float win = step(0.2, f.x) * step(f.x, 0.8) * step(0.25, f.y) * step(f.y, 0.75);
           float h = fract(sin(dot(floor(g) + floor(across) * 7.13, vec2(12.9898, 78.233))) * 43758.5453);
           float lit = step(0.8, h) * step(0.35, vWPos.y);
-          vec3 warm = vec3(1.0, 0.72, 0.38), cold = vec3(0.45, 0.85, 1.0), pink = vec3(1.0, 0.35, 0.75);
-          vec3 wc = h > 0.93 ? pink : (h > 0.84 ? cold : warm);
+          // Tungsten, sodium, and the odd tired fluorescent tube.
+          vec3 warm = vec3(1.0, 0.78, 0.5), sodium = vec3(1.0, 0.6, 0.25), tube = vec3(0.78, 0.88, 0.72);
+          vec3 wc = h > 0.94 ? tube : (h > 0.87 ? sodium : warm);
           totalEmissiveRadiance += side * win * lit * wc * 0.75;
           // Faint roof edge glow.
-          totalEmissiveRadiance += (1.0 - side) * vec3(0.05, 0.03, 0.09);
+          totalEmissiveRadiance += (1.0 - side) * vec3(0.04, 0.035, 0.03);
         }`,
       )
   }
@@ -172,7 +173,7 @@ function buildProps(props: Prop[], group: Group): Object3D[] {
   // Lamps: a post and a glowing head.
   const lamps = byKind.get(PropKind.Lamp) ?? []
   const posts = instanced(new BoxGeometry(0.06, 1.2, 0.06).translate(0, 0.6, 0), new MeshLambertMaterial({ color: 0x3a3a48 }), lamps.length)
-  const heads = instanced(new BoxGeometry(0.2, 0.08, 0.2), new MeshBasicMaterial({ color: 0xffd9a0 }), lamps.length)
+  const heads = instanced(new BoxGeometry(0.2, 0.08, 0.2), new MeshBasicMaterial({ color: 0xffb35c }), lamps.length)
   lamps.forEach((p, i) => {
     tmp.position.set(p.x + 0.35, 0, p.y + 0.35)
     tmp.updateMatrix()
@@ -185,7 +186,7 @@ function buildProps(props: Prop[], group: Group): Object3D[] {
 
   // Vending machines: a box with a lit front panel.
   const vend = byKind.get(PropKind.Vending) ?? []
-  const bodies = instanced(new BoxGeometry(0.6, 0.95, 0.5).translate(0, 0.475, 0), new MeshLambertMaterial({ color: 0xcfd4e0 }), vend.length)
+  const bodies = instanced(new BoxGeometry(0.6, 0.95, 0.5).translate(0, 0.475, 0), new MeshLambertMaterial({ color: 0xbdb8aa }), vend.length)
   const panels = instanced(new BoxGeometry(0.46, 0.6, 0.02).translate(0, 0.55, 0.26), new MeshBasicMaterial(), vend.length)
   vend.forEach((p, i) => {
     tmp.position.set(p.x, 0, p.y)
@@ -201,7 +202,7 @@ function buildProps(props: Prop[], group: Group): Object3D[] {
   // Vat-grown bonsai in plazas.
   const trees = byKind.get(PropKind.Bonsai) ?? []
   const trunks = instanced(new CylinderGeometry(0.05, 0.08, 0.5, 5).translate(0, 0.25, 0), new MeshLambertMaterial({ color: 0x4a3526 }), trees.length)
-  const crowns = instanced(new BoxGeometry(0.55, 0.35, 0.55).translate(0, 0.62, 0), new MeshLambertMaterial({ color: 0x2f7d5a }), trees.length)
+  const crowns = instanced(new BoxGeometry(0.55, 0.35, 0.55).translate(0, 0.62, 0), new MeshLambertMaterial({ color: 0x4f6a3a }), trees.length)
   trees.forEach((p, i) => {
     tmp.position.set(p.x, 0, p.y)
     tmp.updateMatrix()

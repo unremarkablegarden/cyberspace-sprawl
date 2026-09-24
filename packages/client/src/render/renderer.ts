@@ -43,8 +43,8 @@ export class Renderer {
     this.gl.outputColorSpace = SRGBColorSpace
     this.#target.texture.colorSpace = SRGBColorSpace
 
-    this.scene.add(new HemisphereLight(0xb0a0ff, 0x3a2a50, 4.2))
-    const moon = new DirectionalLight(0xc8dcff, 2.4)
+    this.scene.add(new HemisphereLight(0xcfcabd, 0x2e2a24, 3.6))
+    const moon = new DirectionalLight(0xe8dcc4, 2.0)
     moon.position.set(-20, 40, 10)
     this.scene.add(moon)
 

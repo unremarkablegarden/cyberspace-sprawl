@@ -23,7 +23,7 @@ export class Rain {
     }
     const geo = new BufferGeometry()
     geo.setAttribute('position', new BufferAttribute(this.#pos, 3))
-    this.mesh = new LineSegments(geo, new LineBasicMaterial({ color: 0x8fa8d8, transparent: true, opacity: 0.35 }))
+    this.mesh = new LineSegments(geo, new LineBasicMaterial({ color: 0xa8a8a2, transparent: true, opacity: 0.3 }))
     this.mesh.frustumCulled = false
   }
 
