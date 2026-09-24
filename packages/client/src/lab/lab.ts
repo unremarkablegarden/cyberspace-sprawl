@@ -1,5 +1,5 @@
 // Look lab: a local-only page for trying the new look without the server.
-//   /lab.html?scene=street&hour=12&weather=overcast&seams=0&zoom=16
+//   /lab.html?scene=street&hour=12&weather=overcast&seams=0&zoom=12
 //   /lab.html?scene=capsule&hour=23
 // hour and weather default to the real Japan clock and today's seeded weather.
 
@@ -96,9 +96,38 @@ if (q.get('scene') === 'capsule') {
   }
 
   // Isometric camera: 30° down, from the south-east.
-  const zoom = Number(q.get('zoom') ?? 16)
-  const aspect = innerWidth / innerHeight
-  const cam = new OrthographicCamera((-zoom * aspect) / 2, (zoom * aspect) / 2, zoom / 2, -zoom / 2, 0.1, 400)
+  // Zoom: world units from top to bottom of the screen. Wheel, pinch, or + and -.
+  const ZOOM_MIN = 5, ZOOM_MAX = 26
+  let zoom = Number(q.get('zoom') ?? 12)
+  let zoomTarget = zoom
+  const cam = new OrthographicCamera(-1, 1, 1, -1, 0.1, 400)
+  const frame = () => {
+    const aspect = innerWidth / innerHeight
+    Object.assign(cam, { left: (-zoom * aspect) / 2, right: (zoom * aspect) / 2, top: zoom / 2, bottom: -zoom / 2 })
+    cam.updateProjectionMatrix()
+  }
+  frame()
+  const zoomBy = (k: number) => { zoomTarget = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoomTarget * k)) }
+  addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(Math.exp(e.deltaY * 0.0015)) }, { passive: false })
+  addEventListener('keydown', (e) => {
+    if (e.key === '+' || e.key === '=') zoomBy(1 / 1.25)
+    if (e.key === '-' || e.key === '_') zoomBy(1.25)
+  })
+  const touches = new Map<number, [number, number]>()
+  let pinch = 0
+  const spread = () => { const [a, b] = [...touches.values()]; return a && b ? Math.hypot(a[0] - b[0], a[1] - b[1]) : 0 }
+  addEventListener('pointerdown', (e) => { touches.set(e.pointerId, [e.clientX, e.clientY]); pinch = spread() })
+  addEventListener('pointermove', (e) => {
+    if (!touches.has(e.pointerId)) return
+    touches.set(e.pointerId, [e.clientX, e.clientY])
+    const d = spread()
+    if (pinch && d) zoomBy(pinch / d)
+    pinch = d
+  })
+  const lift = (e: PointerEvent) => { touches.delete(e.pointerId); pinch = spread() }
+  addEventListener('pointerup', lift)
+  addEventListener('pointercancel', lift)
+  addEventListener('resize', () => { gl.setSize(innerWidth, innerHeight); frame() })
   const elev = (30 * Math.PI) / 180
   cam.position.set(Math.cos(elev) * Math.SQRT1_2, Math.sin(elev), Math.cos(elev) * Math.SQRT1_2).multiplyScalar(80).add(focus)
   cam.lookAt(focus)
@@ -111,10 +140,14 @@ if (q.get('scene') === 'capsule') {
 
   const v = new Vector3()
   tick = (t) => {
+    if (Math.abs(zoom - zoomTarget) > 0.001) { zoom += (zoomTarget - zoom) * 0.18; frame() }
+    // Name tags fade as you pull back; from far away they are clutter.
+    const tagAlpha = String(1 - Math.min(1, Math.max(0, (zoom - 16) / 5)))
     street.update(focus.x, focus.z, sky.night)
     rain?.update(t, focus.x, focus.z)
     for (const [el, p] of tags) {
       v.copy(p).project(cam)
+      el.style.opacity = tagAlpha
       el.style.transform = `translate(${((v.x + 1) / 2) * innerWidth}px, ${((1 - v.y) / 2) * innerHeight}px) translate(-50%, -100%)`
     }
   }

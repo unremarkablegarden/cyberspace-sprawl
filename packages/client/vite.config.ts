@@ -11,5 +11,10 @@ export default defineConfig({
       '/api': { target: 'http://127.0.0.1:8787' },
     },
   },
-  build: { target: 'es2022', chunkSizeWarningLimit: 800 },
+  build: {
+    target: 'es2022',
+    chunkSizeWarningLimit: 800,
+    // lab.html is a look test page, served at /lab.html alongside the game.
+    rollupOptions: { input: { main: 'index.html', lab: 'lab.html' } },
+  },
 })
