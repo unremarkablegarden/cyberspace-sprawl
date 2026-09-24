@@ -5,7 +5,7 @@
 // Units: the street's, where a person is about 1.0 (≈ 1.75 m).
 
 import {
-  BackSide, BoxGeometry, CanvasTexture, Color, CylinderGeometry, ExtrudeGeometry, Group, HemisphereLight, Mesh,
+  BackSide, BoxGeometry, CanvasTexture, CatmullRomCurve3, IcosahedronGeometry, TubeGeometry, Color, CylinderGeometry, ExtrudeGeometry, Group, HemisphereLight, Mesh,
   MeshBasicMaterial, MeshStandardMaterial, Path, PlaneGeometry, PointLight, Scene, Shape, SphereGeometry, SpotLight,
   FrontSide, Plane, ShapeGeometry, TorusGeometry, Vector3, type BufferGeometry, type Material, type Texture,
 } from 'three'
@@ -68,6 +68,45 @@ function outsideView(sky: Sky): CanvasTexture {
   const tex = new CanvasTexture(c)
   tex.colorSpace = 'srgb'
   return tex
+}
+
+
+/** A gig poster: cream paper, a sodium sun, a few lines of type. */
+function posterTexture(): CanvasTexture {
+  const c = document.createElement('canvas')
+  c.width = 110
+  c.height = 150
+  const g = c.getContext('2d')!
+  g.fillStyle = '#e8e0cc'
+  g.fillRect(0, 0, 110, 150)
+  g.fillStyle = '#c2412f'
+  g.beginPath()
+  g.arc(55, 58, 30, 0, Math.PI * 2)
+  g.fill()
+  g.fillStyle = '#1e1d1c'
+  g.fillRect(0, 70, 110, 5)
+  for (let i = 0; i < 4; i++) g.fillRect(14, 102 + i * 9, 30 + ((i * 29) % 50), 4)
+  const t = new CanvasTexture(c)
+  t.colorSpace = 'srgb'
+  return t
+}
+
+/** A striped wool rug. */
+function rugTexture(): CanvasTexture {
+  const c = document.createElement('canvas')
+  c.width = 64
+  c.height = 96
+  const g = c.getContext('2d')!
+  g.fillStyle = '#5e2424'
+  g.fillRect(0, 0, 64, 96)
+  const stripes = ['#c9a24a', '#e6dcc0', '#2e2f33']
+  for (let y = 8, i = 0; y < 96; y += 11, i++) {
+    g.fillStyle = stripes[i % 3]!
+    g.fillRect(0, y, 64, 3)
+  }
+  const t = new CanvasTexture(c)
+  t.colorSpace = 'srgb'
+  return t
 }
 
 export interface Capsule {
@@ -137,10 +176,46 @@ export function buildCapsule(sky: Sky, blob: Texture): Capsule {
   part(soft(0.13, 0.02, 0.2, 0.008), dark, 0.2, 0.49, 0.1, unit)
   part(new CylinderGeometry(0.022, 0.018, 0.05, 16), new MeshStandardMaterial({ color: 0xc9a24a, roughness: 0.6 }), 0.24, 0.505, 0.36, unit)
 
-  // A sticker on the far wall: somebody's old sign.
-  const sticker = new Mesh(new PlaneGeometry(0.13, 0.18), new MeshBasicMaterial({ color: 0xa8352c }))
-  sticker.position.set(-0.45, 0.9, -D / 2 + 0.02)
-  room.add(sticker)
+  // A print on the far wall: a gig poster from somewhere in Ninsei.
+  const poster = new Mesh(new PlaneGeometry(0.22, 0.3), new MeshStandardMaterial({ map: posterTexture(), roughness: 0.9 }))
+  poster.position.set(-0.47, 0.66, -D / 2 + 0.012)
+  room.add(poster)
+
+  // A shelf of paperbacks above the poster.
+  const shelfX = -0.47, shelfY = 0.93
+  part(soft(0.26, 0.018, 0.12, 0.006), panel, shelfX, shelfY, -D / 2 + 0.08, room)
+  const BOOKS = [0x6e2a2a, 0xd9d0bc, 0x2e3a44, 0xb8652f, 0x4a5236, 0xe6dcc0, 0x3d2c29]
+  let bx0 = shelfX - 0.11
+  BOOKS.forEach((hex, i) => {
+    const w = 0.022 + (i % 3) * 0.006, h = 0.09 + ((i * 7) % 4) * 0.012
+    part(new BoxGeometry(w, h, 0.075), new MeshStandardMaterial({ color: hex, roughness: 0.8 }), bx0 + w / 2, shelfY + 0.009 + h / 2, -D / 2 + 0.08, room)
+    bx0 += w + 0.003
+  })
+
+  // A plant in the corner, doing its best.
+  part(new CylinderGeometry(0.06, 0.045, 0.1, 16), new MeshStandardMaterial({ color: 0xb8652f, roughness: 0.9 }), -0.46, 0.07, -D / 2 + 0.16, room)
+  for (let i = 0; i < 5; i++) {
+    const leaf = part(new IcosahedronGeometry(0.055, 1), new MeshStandardMaterial({ color: [0x4f6a3a, 0x5d7a42, 0x44602f][i % 3], roughness: 0.9 }),
+      -0.46 + Math.cos(i * 1.3) * 0.04, 0.17 + (i % 3) * 0.045, -D / 2 + 0.16 + Math.sin(i * 1.3) * 0.04, room)
+    leaf.scale.set(1, 0.7, 1)
+  }
+
+  // A rug.
+  part(soft(0.46, 0.008, 0.66, 0.06), new MeshStandardMaterial({ map: rugTexture(), roughness: 1 }), -0.05, 0.024, 0.55, room)
+
+  // Coat on a hook by the door.
+  part(new CylinderGeometry(0.008, 0.008, 0.05, 8).rotateZ(Math.PI / 2), chrome, -W / 2 + 0.05, 1.02, 0.95, room)
+  const hung = part(new CylinderGeometry(0.035, 0.1, 0.5, 12), new MeshStandardMaterial({ color: 0x6b5a45, roughness: 0.9 }), -W / 2 + 0.1, 0.77, 0.95, room)
+  hung.scale.z = 0.5
+
+  // Shoes by the bed, tapes on the desk, a cable nobody tidied.
+  for (const dz of [0, 0.07]) part(soft(0.12, 0.04, 0.05, 0.015), new MeshStandardMaterial({ color: 0x1b1a19, roughness: 0.5 }), W / 2 - 0.72, 0.045, 0.45 + dz, room)
+  for (let i = 0; i < 3; i++) part(soft(0.07, 0.012, 0.045, 0.004), new MeshStandardMaterial({ color: [0x2a2826, 0xd9d0bc, 0x8f3a2e][i]! }), -W / 2 + 0.33, 0.492 + i * 0.013, -0.02 - i * 0.004, room)
+  const cable = new CatmullRomCurve3([
+    new Vector3(-W / 2 + 0.2, 0.7, -0.08), new Vector3(-W / 2 + 0.24, 0.3, 0.0),
+    new Vector3(-0.3, 0.035, 0.15), new Vector3(0.05, 0.035, 0.05), new Vector3(W / 2 - 0.64, 0.035, -0.3),
+  ])
+  part(new TubeGeometry(cable, 48, 0.006, 6), dark, 0, 0, 0, room)
 
   // Tungsten reading lamp over the bed.
   const lampPos = new Vector3(W / 2 - 0.2, 0.95, -0.95)

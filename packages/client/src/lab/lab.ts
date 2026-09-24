@@ -12,7 +12,8 @@ import { districtById, START_DISTRICT } from '@sprawl/content'
 import { haze, jstHour, skyAt, weatherFor, type WeatherKind } from './haze.ts'
 import { Post } from './post.ts'
 import { blobTexture, buildStreet } from './street.ts'
-import { buildFigure, type FigureSpec } from './figure.ts'
+import { animateWalk, buildFigure, type FigureSpec, type Rig } from './figure.ts'
+import { buildLife } from './life.ts'
 import { buildCapsule } from './capsule.ts'
 import { Rain } from '../render/rain.ts'
 
@@ -73,17 +74,23 @@ const people: [string, number, number, FigureSpec][] = [
   ['finn', 2.2, 2.0, { skin: 0x7d4e30, coat: 0x5e2424, legs: 0x2e2f33, hair: 0x2c3440, hairStyle: 0, coatLength: 0, height: 1.0 }],
 ]
 const tags: [HTMLElement, Vector3][] = []
+const cast: Rig[] = []
 for (const [name, dx, dz, spec] of people) {
   const f = buildFigure(spec, blob)
   f.position.set(focus.x + dx, 0, focus.z + dz)
   f.rotation.y = (dx * 1.7 + dz) % (Math.PI * 2)
   streetScene.add(f)
+  cast.push(f.userData.rig as Rig)
   const tag = document.createElement('div')
   tag.className = 'lab-tag'
   tag.textContent = name
   document.body.append(tag)
   tags.push([tag, new Vector3(f.position.x, f.position.y + spec.height * 1.06, f.position.z)])
 }
+
+// People walking, traffic, steam.
+const life = buildLife(map, focus, blob)
+streetScene.add(life.group)
 
 // Isometric camera, 30° down from the south-east, shared by street and
 // capsule. Zoom is the world height of the screen: wheel, pinch, or + and -.
@@ -108,11 +115,14 @@ frameIso()
 
 let scene: Scene = streetScene
 let night = 0
+let wet = 0
+const WET: Record<WeatherKind, number> = { drizzle: 1, fog: 0.45, overcast: 0.2, clear: 0.05 }
 let shown = 'street'
 
 function apply(): void {
   const sky = skyAt(state.hour, state.weather)
   night = sky.night
+  wet = WET[state.weather]
   if (shown !== state.scene) {
     // Each scene keeps its own zoom.
     ZOOM[shown as 'street'].at = zoomTarget
@@ -273,10 +283,15 @@ addEventListener('resize', () => {
 apply()
 const v = new Vector3()
 let frames = 0
+let last = 0
 gl.setAnimationLoop((ms) => {
+  const dt = Math.min(0.1, (ms - (last || ms)) / 1000)
+  last = ms
   if (Math.abs(zoom - zoomTarget) > 0.001) { zoom += (zoomTarget - zoom) * 0.18; frameIso() }
   if (state.scene === 'street') {
-    street.update(focus.x, focus.z, night)
+    street.update(focus.x, focus.z, night, wet)
+    life.update(ms / 1000, dt, night)
+    cast.forEach((r, i) => animateWalk(r, i * 1.7, 0, ms / 1000))
     if (rain.mesh.visible) rain.update(ms / 1000, focus.x, focus.z)
     // Name tags fade as you pull back; from far away they are clutter.
     const alpha = String(1 - Math.min(1, Math.max(0, (zoom - 16) / 5)))

@@ -6,8 +6,8 @@
 // of buildings. The capsule hotel is a Nakagin-style tower of pods.
 
 import {
-  AdditiveBlending, CanvasTexture, Color, CylinderGeometry, Group, IcosahedronGeometry, InstancedMesh, Mesh,
-  MeshBasicMaterial, MeshStandardMaterial, Object3D, PlaneGeometry, SRGBColorSpace, Vector2, type BufferGeometry,
+  AdditiveBlending, BufferAttribute, BufferGeometry, CanvasTexture, LineBasicMaterial, LineSegments, Color, CylinderGeometry, Group, IcosahedronGeometry, InstancedMesh, Mesh,
+  MeshBasicMaterial, MeshStandardMaterial, Object3D, PlaneGeometry, SRGBColorSpace, Vector2,
   type Material,
 } from 'three'
 import { hashString, PropKind, Tile, type DistrictMap, type Prop } from '@sprawl/shared'
@@ -237,7 +237,8 @@ function blocks(map: DistrictMap, kind: number): [number, number, number, number
 
 export interface Street {
   group: Group
-  update(focusX: number, focusZ: number, night: number): void
+  /** `wet` is 0 dry to 1 soaked: reflections on the ground. */
+  update(focusX: number, focusZ: number, night: number, wet: number): void
 }
 
 export function buildStreet(map: DistrictMap): Street {
@@ -248,10 +249,8 @@ export function buildStreet(map: DistrictMap): Street {
   const outer = new Mesh(new PlaneGeometry(400, 400).rotateX(-Math.PI / 2), hazed(new MeshStandardMaterial({ color: 0x2b2c2d, roughness: 0.9 })))
   outer.position.set(map.width / 2, -0.01, map.height / 2)
   outer.receiveShadow = true
-  const ground = new Mesh(
-    new PlaneGeometry(map.width, map.height).rotateX(-Math.PI / 2),
-    hazed(new MeshStandardMaterial({ map: paintGround(map), roughness: 0.85 }), 'ground'),
-  )
+  const groundMat = hazed(new MeshStandardMaterial({ map: paintGround(map), roughness: 0.85 }), 'ground')
+  const ground = new Mesh(new PlaneGeometry(map.width, map.height).rotateX(-Math.PI / 2), groundMat)
   ground.position.set(map.width / 2 - 0.5, 0, map.height / 2 - 0.5)
   ground.receiveShadow = true
   group.add(outer, ground)
@@ -348,6 +347,13 @@ export function buildStreet(map: DistrictMap): Street {
     glows.setColorAt(i, color.setHex(hex))
   })
   group.add(signs, glows)
+  const reflect: [number, number, number, number, number][] = [] // x, z, height, colour, width
+  neon.forEach((p) => {
+    const [ox, oz] = faces[p.rot]!
+    const r = (hashString(`sign:${p.x}:${p.y}`) >>> 0) % 100
+    const hex = r < 6 ? SIGN_LOUD[r % 2]! : SIGN_WARM[p.hue % SIGN_WARM.length]!
+    reflect.push([p.x + ox * 0.62, p.y + oz * 0.62, Math.min(p.z * STOREY * 1.5, 3 * STOREY) + 1.0, hex, 0.3])
+  })
 
   // Sodium lamps with a pool of light on the ground.
   const lamps = map.props.filter((p) => p.kind === PropKind.Lamp)
@@ -372,6 +378,7 @@ export function buildStreet(map: DistrictMap): Street {
   })
   posts.castShadow = true
   group.add(posts, heads, pools)
+  for (const p of lamps) reflect.push([p.x + 0.25, p.y + 0.35, 2.4, 0xffb35c, 0.34])
 
   // Vending machines, the one bright cheap thing on every corner.
   const vend = map.props.filter((p) => p.kind === PropKind.Vending)
@@ -387,6 +394,7 @@ export function buildStreet(map: DistrictMap): Street {
   tmp.rotation.set(0, 0, 0)
   bodies.castShadow = true
   group.add(bodies, panels)
+  for (const p of vend) reflect.push([p.x, p.y, 0.8, 0xe8e4d8, 0.4])
 
   // Plaza trees: dark trunks, soft round crowns.
   const trees = map.props.filter((p) => p.kind === PropKind.Bonsai)
@@ -403,15 +411,93 @@ export function buildStreet(map: DistrictMap): Street {
   trunks.castShadow = crowns.castShadow = true
   group.add(trunks, crowns)
 
+  // Wet ground: every light smears a streak across the ground towards the
+  // viewer, as it would on wet asphalt.
+  const streakTex = (() => {
+    const c = document.createElement('canvas')
+    c.width = 32
+    c.height = 128
+    const g = c.getContext('2d')!
+    const v = g.createLinearGradient(0, 0, 0, 128)
+    v.addColorStop(0, 'rgba(255,255,255,0.0)')
+    v.addColorStop(0.08, 'rgba(255,255,255,0.9)')
+    v.addColorStop(1, 'rgba(255,255,255,0)')
+    g.fillStyle = v
+    g.fillRect(0, 0, 32, 128)
+    const hmask = g.createLinearGradient(0, 0, 32, 0)
+    hmask.addColorStop(0, 'rgba(0,0,0,1)')
+    hmask.addColorStop(0.5, 'rgba(0,0,0,0)')
+    hmask.addColorStop(1, 'rgba(0,0,0,1)')
+    g.globalCompositeOperation = 'destination-out'
+    g.fillStyle = hmask
+    g.fillRect(0, 0, 32, 128)
+    return new CanvasTexture(c)
+  })()
+  const streakMat = new MeshBasicMaterial({ map: streakTex, transparent: true, depthWrite: false, blending: AdditiveBlending })
+  const streaks = inst(new PlaneGeometry(1, 1).rotateX(-Math.PI / 2), streakMat, reflect.length)
+  reflect.forEach(([x, z, h, hex, w], i) => {
+    const len = h * 0.9
+    tmp.position.set(x + len * 0.3536, 0.015, z + len * 0.3536)
+    tmp.rotation.set(0, Math.PI / 4, 0)
+    tmp.scale.set(w, 1, len)
+    tmp.updateMatrix()
+    streaks.setMatrixAt(i, tmp.matrix)
+    streaks.setColorAt(i, color.setHex(hex))
+  })
+  tmp.rotation.set(0, 0, 0)
+  tmp.scale.set(1, 1, 1)
+  streaks.renderOrder = 2
+  group.add(streaks)
+
+  // Overhead wires strung across the streets between facing buildings.
+  const pts: number[] = []
+  const isB = (x: number, y: number) => map.inBounds(x, y) && (map.tile(x, y) === Tile.Building || map.tile(x, y) === Tile.Capsule)
+  const road = (x: number, y: number) => map.inBounds(x, y) && map.tile(x, y) === Tile.Road
+  const catenary = (ax: number, ay: number, az: number, bx: number, by: number, bz: number, sag: number) => {
+    const n = 14
+    for (let i = 0; i < n; i++) {
+      const t0 = i / n, t1 = (i + 1) / n
+      for (const t of [t0, t1]) pts.push(ax + (bx - ax) * t, ay + (by - ay) * t - Math.sin(t * Math.PI) * sag, az + (bz - az) * t)
+    }
+  }
+  for (let y = 2; y < map.height - 3; y++)
+    for (let x = 1; x < map.width - 1; x++) {
+      if (!(road(x, y) && road(x, y + 1) && !road(x, y - 1))) continue
+      if (!isB(x, y - 2) || !isB(x, y + 3)) continue
+      if ((hashString(`wire:${x}:${y}`) >>> 0) % 9 !== 0) continue
+      const wires = 2 + ((hashString(`w${x}${y}`) >>> 0) % 3)
+      for (let k = 0; k < wires; k++) {
+        const h0 = 2.6 + ((x * 13 + k * 7) % 10) * 0.16, h1 = 2.6 + ((x * 7 + k * 11) % 10) * 0.16
+        catenary(x - 0.3 + k * 0.08, h0, y - 1.5, x + 0.2 + k * 0.12, h1, y + 2.5, 0.3 + k * 0.06)
+      }
+    }
+  for (let x = 2; x < map.width - 3; x++)
+    for (let y = 1; y < map.height - 1; y++) {
+      if (!(road(x, y) && road(x + 1, y) && !road(x - 1, y))) continue
+      if (!isB(x - 2, y) || !isB(x + 3, y)) continue
+      if ((hashString(`wire:${x}:${y}:v`) >>> 0) % 9 !== 0) continue
+      const wires = 2 + ((hashString(`v${x}${y}`) >>> 0) % 3)
+      for (let k = 0; k < wires; k++) {
+        const h0 = 2.6 + ((y * 13 + k * 7) % 10) * 0.16, h1 = 2.6 + ((y * 7 + k * 11) % 10) * 0.16
+        catenary(x - 1.5, h0, y - 0.3 + k * 0.08, x + 2.5, h1, y + 0.2 + k * 0.12, 0.3 + k * 0.06)
+      }
+    }
+  const wireGeo = new BufferGeometry()
+  wireGeo.setAttribute('position', new BufferAttribute(new Float32Array(pts), 3))
+  group.add(new LineSegments(wireGeo, hazed(new LineBasicMaterial({ color: 0x1c1b1a }), 'wire')))
+
   return {
     group,
-    update(fx, fz, night) {
+    update(fx, fz, night, wet) {
       focus.value.set(fx, fz)
       // Signs run brighter than white at night so the bloom picks them up.
       signMat.color.setScalar(0.8 + 0.9 * night)
       glowMat.opacity = 0.12 * night
       poolMat.opacity = night
       haze.uNight.value = night
+      streakMat.opacity = wet * (0.12 + night * 0.6)
+      groundMat.color.setScalar(1 - wet * 0.22)
+      groundMat.roughness = 0.85 - wet * 0.4
     },
   }
 }
