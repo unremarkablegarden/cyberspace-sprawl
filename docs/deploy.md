@@ -27,11 +27,11 @@ after `bun run build` at the root.
 
 ## Branch previews
 
-Each non-`main` branch gets a preview at `<branch>.dev.sprawl.cyberspace.online`
-(the Worker's Domains tab has `dev.sprawl.cyberspace.online` enabled for
-Preview), so the `dev` branch is always at `dev.dev.sprawl.cyberspace.online`. Cloudflare
-issues the wildcard certificate after the first preview build; until then the
-name fails with a TLS error. **Each preview has its own empty Durable Object
+Each non-`main` branch gets a preview at `<branch>.sprawl.cyberspace.online`
+(the Worker's Domains tab has `sprawl.cyberspace.online` enabled for
+Production and Preview), so the `dev` branch is always at
+`dev.sprawl.cyberspace.online`. Cloudflare issues the wildcard certificate
+after the first preview build; until then the name fails with a TLS error. **Each preview has its own empty Durable Object
 storage**, so testing a branch can never touch the live world.
 Previews are public by default; put Cloudflare Access in front if that matters.
 Guest sign-in doesn't work on previews (it is localhost-only), so sign in with
