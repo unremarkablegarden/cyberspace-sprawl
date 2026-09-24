@@ -333,8 +333,12 @@ export function buildStreet(map: DistrictMap): Street {
           vec2 rip = vec2(wNoise(p * 5.0 + uTime * 1.1), wNoise(p * 5.0 - uTime * 0.9)) - 0.5;
           vec4 rp = uReflMat * vec4(vHzW, 1.0);
           vec2 ruv = rp.xy / rp.w + rip * mix(0.005, 0.0015, puddle);
-          vec3 mirror = texture2D(uRefl, ruv).rgb;
-          float k = uWet * mix(0.1, 0.6, puddle);
+          // Softer the less wet it is: a thin film blurs what a puddle mirrors.
+          float r = mix(0.012, 0.0015, uWet);
+          vec3 mirror = (texture2D(uRefl, ruv).rgb * 2.0
+            + texture2D(uRefl, ruv + vec2(r, 0.0)).rgb + texture2D(uRefl, ruv - vec2(r, 0.0)).rgb
+            + texture2D(uRefl, ruv + vec2(0.0, r)).rgb + texture2D(uRefl, ruv - vec2(0.0, r)).rgb) / 6.0;
+          float k = uWet * uWet * mix(0.1, 0.6, puddle);
           // Water darkens what it covers and shows the sky's glow in its place.
           gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - 0.5 * k) + mirror * k;
         }

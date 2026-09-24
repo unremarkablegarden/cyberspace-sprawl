@@ -162,7 +162,8 @@ function renderMirror(): void {
 let scene: Scene = streetScene
 let night = 0
 let wet = 0
-const WET: Record<WeatherKind, number> = { drizzle: 1, fog: 0.45, overcast: 0.2, clear: 0.05 }
+// Only rain wets the street; fog leaves a thin, soft sheen.
+const WET: Record<WeatherKind, number> = { drizzle: 1, fog: 0.3, overcast: 0, clear: 0 }
 let shown = 'street'
 
 function apply(): void {

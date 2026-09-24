@@ -206,9 +206,9 @@ export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture): Life
 
   // Real headlights on the cars nearest the focus: a fixed pool (constant
   // light count, so no shader recompiles), faded out towards its reach.
-  const HEADLIGHTS = 4, REACH = 12
+  const HEADLIGHTS = 6, REACH = 14
   const headlights = Array.from({ length: HEADLIGHTS }, () => {
-    const l = new SpotLight(0xfff0d8, 0, 8, 0.42, 0.55, 2)
+    const l = new SpotLight(0xfff0d8, 0, 12, 0.5, 0.5, 2)
     group.add(l, l.target)
     return l
   })
@@ -277,7 +277,7 @@ export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture): Life
         if (c.axis === 'x') c.root.position.set(c.pos, 0, c.lane)
         else c.root.position.set(c.lane, 0, c.pos)
         // The real light does the lighting; the beam is only the glow in the haze.
-        ;(c.beams.material as MeshBasicMaterial).opacity = night * 0.12
+        ;(c.beams.material as MeshBasicMaterial).opacity = night * 0.2
         c.beams.visible = night > 0.05
       }
       byDistance.sort((a, b) => carDist(cars[a]!) - carDist(cars[b]!))
@@ -287,7 +287,7 @@ export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture): Life
         c.root.updateMatrixWorld()
         c.root.localToWorld(l.position.set(0.5, 0.18, 0))
         c.root.localToWorld(l.target.position.set(4, 0, 0))
-        l.intensity = 22 * night * (1 - Math.min(1, Math.max(0, (carDist(c) - REACH + 3) / 3)))
+        l.intensity = 55 * night * (1 - Math.min(1, Math.max(0, (carDist(c) - REACH + 3) / 3)))
         l.visible = l.intensity > 0
       })
 
