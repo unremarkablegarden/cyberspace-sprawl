@@ -1,0 +1,19 @@
+{
+  "name": "@sprawl/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "check": "wrangler deploy --dry-run --outdir ../../dist/server"
+  },
+  "dependencies": {
+    "@sprawl/content": "workspace:*",
+    "@sprawl/shared": "workspace:*",
+    "jose": "^6.2.12"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260924.1",
+    "wrangler": "^4.138.0"
+  }
+}

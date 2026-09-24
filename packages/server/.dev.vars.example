@@ -1,0 +1,3 @@
+# Copy to .dev.vars for local development. Never set these in production.
+# Lets /?guest=<name> sign in without a cyberspace account, from localhost only.
+DEV_GUEST=1

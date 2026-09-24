@@ -1,0 +1,70 @@
+/* One stylesheet, theme colours as variables. */
+:root {
+  --bg: #0b0716;
+  --panel: rgba(14, 10, 28, 0.88);
+  --fg: #d9f2ff;
+  --dim: #8a86a8;
+  --line: #3a3358;
+  --pink: #ff2e88;
+  --cyan: #2ef2ff;
+  --font: 'VT323', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; }
+body { font: 20px/1.2 var(--font); -webkit-font-smoothing: none; }
+button, input { font: inherit; color: inherit; }
+a { color: var(--cyan); }
+.dim { color: var(--dim); }
+.small { font-size: 16px; }
+
+canvas.view { position: fixed; inset: 0; display: block; image-rendering: pixelated; touch-action: none; }
+.overlay { position: fixed; inset: 0; pointer-events: none; }
+.overlay > * { position: absolute; }
+
+/* Name tags and chat bubbles follow players; transforms are set per frame. */
+.tag { left: 0; top: 0; padding: 0 4px; font-size: 16px; color: var(--fg); text-shadow: 1px 1px 0 #000; white-space: nowrap; }
+.tag.me { color: var(--cyan); }
+.bubble {
+  left: 0; top: 0; max-width: 200px; padding: 2px 6px; background: #f3f0ff; color: #140c24;
+  border: 2px solid #140c24; box-shadow: 3px 3px 0 var(--pink); font-size: 17px; line-height: 1.1;
+}
+
+.hud { top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; pointer-events: none; }
+.hud .left { text-shadow: 1px 1px 0 #000; }
+.hud .place { color: var(--pink); }
+.hud .right { display: flex; gap: 8px; align-items: center; pointer-events: auto; }
+.hud .status { position: fixed; top: 44px; left: 50%; transform: translateX(-50%); padding: 2px 10px; background: var(--panel); border: 1px solid var(--line); }
+
+.chat { left: 12px; bottom: 12px; width: min(460px, calc(100vw - 24px)); pointer-events: auto; }
+.chat .log { text-shadow: 1px 1px 0 #000; margin-bottom: 6px; }
+.chat .line { padding: 1px 0; }
+.chat .who { color: var(--pink); }
+.chat .who.me { color: var(--cyan); }
+.chat .sys { color: var(--dim); }
+.chat .say { width: 100%; padding: 6px 8px; background: var(--panel); border: 1px solid var(--line); outline: none; }
+.chat .say:focus { border-color: var(--cyan); }
+
+button { background: var(--pink); color: #10081e; border: 0; padding: 4px 12px; cursor: pointer; }
+button:disabled { opacity: 0.5; }
+button.ghost { background: var(--panel); color: var(--fg); border: 1px solid var(--line); }
+button.ghost:hover { border-color: var(--cyan); }
+
+.screen { position: fixed; inset: 0; display: grid; place-items: center; background: radial-gradient(ellipse at 50% 40%, #2a1248 0%, var(--bg) 70%); padding: 16px; }
+.login { width: min(360px, 100%); display: grid; gap: 10px; }
+.login h1 { margin: 0; font-size: 56px; font-weight: normal; letter-spacing: 4px; color: var(--pink); text-shadow: 3px 3px 0 #1d0b33, 0 0 18px rgba(255, 46, 136, 0.6); }
+.login input { padding: 8px 10px; background: rgba(0, 0, 0, 0.4); border: 1px solid var(--line); outline: none; }
+.login input:focus { border-color: var(--cyan); }
+.login .status { min-height: 1.2em; margin: 0; color: var(--cyan); }
+.login p { margin: 0; }
+
+.panel { position: fixed; right: 12px; top: 52px; width: min(360px, calc(100vw - 24px)); max-height: calc(100vh - 70px); overflow: auto; background: var(--panel); border: 1px solid var(--line); padding: 12px 14px; box-shadow: 4px 4px 0 #000; }
+.panel h2 { margin: 0 0 8px; font-weight: normal; color: var(--cyan); }
+.customiser .row { display: grid; grid-template-columns: 112px 1fr; align-items: center; gap: 8px; margin: 4px 0; }
+.customiser label { color: var(--dim); white-space: nowrap; }
+.customiser .field { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.customiser .value { min-width: 96px; text-align: center; }
+.customiser .step { background: transparent; color: var(--cyan); padding: 0 8px; font-size: 24px; }
+.customiser .swatch { width: 18px; height: 18px; padding: 0; border: 1px solid #000; }
+.customiser .swatch.on { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.customiser .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }

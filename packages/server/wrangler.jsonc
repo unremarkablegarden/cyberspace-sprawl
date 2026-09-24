@@ -1,0 +1,37 @@
+// Cloudflare Worker for The Sprawl: serves the built client, proxies sign-in,
+// and routes WebSockets to Durable Object rooms. See docs/deploy.md.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cyberspace-sprawl",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "../client/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    // Without this the SPA fallback answers /rooms/* and swallows the WebSocket upgrade.
+    "run_worker_first": ["/rooms/*", "/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "DISTRICT", "class_name": "District" },
+      { "name": "PLAYER", "class_name": "Player" }
+    ]
+  },
+  // Migrations are append-only history. NEVER add a deleted_classes or
+  // renamed_classes step for District or Player: it destroys or moves the
+  // world's stored state. See docs/operations.md.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["District", "Player"] }],
+  "observability": { "enabled": true },
+  // Branch previews (`wrangler preview`, run by Workers Builds for non-main
+  // branches). Each preview gets its own fresh Durable Object storage, so a
+  // preview can never touch the live world.
+  "previews": {
+    "durable_objects": {
+      "bindings": [
+        { "name": "DISTRICT", "class_name": "District" },
+        { "name": "PLAYER", "class_name": "Player" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "cyberspace-sprawl",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev": "bun tools/dev.ts",
+    "build": "bun run --cwd packages/client build",
+    "preview": "bun run build && bun run --cwd packages/server dev",
+    "typecheck": "tsc -p packages/shared && tsc -p packages/content && tsc -p packages/server && tsc -p packages/client",
+    "test": "bun test packages",
+    "content:check": "bun packages/content/src/check.ts",
+    "bots": "bun tools/bots.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "playwright-core": "^1.63.0",
+    "typescript": "^7.0.2"
+  }
+}
