@@ -12,9 +12,9 @@ import { districtById, START_DISTRICT } from '@sprawl/content'
 import { haze, jstHour, skyAt, weatherFor, type WeatherKind } from './haze.ts'
 import { Post } from './post.ts'
 import { blobTexture, buildStreet } from './street.ts'
-import { animateWalk, buildFigure, type FigureSpec, type Rig } from './figure.ts'
+import { animateWalk, buildFigure, Crowd, type FigureSpec, type Rig } from './figure.ts'
 import { buildLife } from './life.ts'
-import { buildCapsule } from './capsule.ts'
+import { buildCapsule, type Capsule } from './capsule.ts'
 import { Rain } from '../render/rain.ts'
 
 const WEATHERS: WeatherKind[] = ['overcast', 'drizzle', 'fog', 'clear']
@@ -26,8 +26,13 @@ const state = {
   seams: q.get('seams') === '1',
 }
 
-const gl = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
-gl.setPixelRatio(Math.min(devicePixelRatio, 1.5))
+// No antialiasing on the canvas: the scene is multisampled in the post
+// target, and the canvas only ever gets a full-screen quad.
+const gl = new WebGLRenderer({ antialias: false, powerPreference: 'high-performance' })
+// Resolution adapts to the machine (see `adapt` below); ?dpr= pins it.
+const PR_MAX = q.has('dpr') ? Number(q.get('dpr')) : Math.min(devicePixelRatio, 1.5)
+let pr = PR_MAX
+gl.setPixelRatio(pr)
 gl.setSize(innerWidth, innerHeight)
 gl.outputColorSpace = SRGBColorSpace
 // Tone mapping and the colour-space conversion happen in the post pass.
@@ -35,6 +40,11 @@ gl.toneMapping = NoToneMapping
 gl.shadowMap.enabled = true
 gl.localClippingEnabled = true
 gl.shadowMap.type = PCFShadowMap
+// Shadows are redrawn on demand: every other frame on the street, where
+// people and cars move, and only after a change in the capsule.
+gl.shadowMap.autoUpdate = false
+let shadowsDirty = true
+gl.info.autoReset = false
 gl.domElement.className = 'lab-view'
 document.body.append(gl.domElement)
 const post = new Post(gl)
@@ -65,6 +75,7 @@ streetScene.add(rain.mesh)
 
 // A few people on the main street.
 const blob = blobTexture()
+const crowd = new Crowd(blob)
 const people: [string, number, number, FigureSpec][] = [
   ['case', 0, 0, { skin: 0xd9a37e, coat: 0x2e2f33, legs: 0x161615, hair: 0x141312, hairStyle: 1, coatLength: 1, height: 1.02 }],
   ['molly', 1.4, 0.6, { skin: 0xeac0a0, coat: 0x161615, legs: 0x161615, hair: 0x141312, hairStyle: 1, coatLength: 0, height: 0.98 }],
@@ -73,24 +84,23 @@ const people: [string, number, number, FigureSpec][] = [
   ['armitage', 3.0, -0.4, { skin: 0xa06a45, coat: 0x4a5a68, legs: 0x1f2a36, hair: 0x141312, hairStyle: 1, coatLength: 1, height: 1.06 }],
   ['finn', 2.2, 2.0, { skin: 0x7d4e30, coat: 0x5e2424, legs: 0x2e2f33, hair: 0x2c3440, hairStyle: 0, coatLength: 0, height: 1.0 }],
 ]
-const tags: [HTMLElement, Vector3][] = []
+const tags: [HTMLElement, Vector3, string][] = []
 const cast: Rig[] = []
 for (const [name, dx, dz, spec] of people) {
-  const f = buildFigure(spec, blob)
+  const f = buildFigure(spec, blob, crowd)
   f.position.set(focus.x + dx, 0, focus.z + dz)
   f.rotation.y = (dx * 1.7 + dz) % (Math.PI * 2)
-  streetScene.add(f)
   cast.push(f.userData.rig as Rig)
   const tag = document.createElement('div')
   tag.className = 'lab-tag'
   tag.textContent = name
   document.body.append(tag)
-  tags.push([tag, new Vector3(f.position.x, f.position.y + spec.height * 1.06, f.position.z)])
+  tags.push([tag, new Vector3(f.position.x, f.position.y + spec.height * 1.06, f.position.z), ''])
 }
 
 // People walking, traffic, steam.
-const life = buildLife(map, focus, blob)
-streetScene.add(life.group)
+const life = buildLife(map, focus, blob, crowd)
+streetScene.add(life.group, crowd.build())
 
 // Isometric camera, 30° down from the south-east, shared by street and
 // capsule. Zoom is the world height of the screen: wheel, pinch, or + and -.
@@ -118,6 +128,7 @@ let night = 0
 let wet = 0
 const WET: Record<WeatherKind, number> = { drizzle: 1, fog: 0.45, overcast: 0.2, clear: 0.05 }
 let shown = 'street'
+let capsule: Capsule | null = null
 
 function apply(): void {
   const sky = skyAt(state.hour, state.weather)
@@ -131,9 +142,10 @@ function apply(): void {
     frameIso()
   }
   if (state.scene === 'capsule') {
-    const c = buildCapsule(sky, blob)
-    scene = c.scene
-    aim(c.focus)
+    capsule ??= buildCapsule(blob)
+    capsule.update(sky)
+    scene = capsule.scene
+    aim(capsule.focus)
     // No street haze indoors.
     haze.uHzNear.value = 1e5
     haze.uHzFar.value = 1e5 + 1
@@ -157,6 +169,7 @@ function apply(): void {
     rain.mesh.visible = state.weather === 'drizzle'
   }
   for (const [el] of tags) el.hidden = state.scene !== 'street'
+  shadowsDirty = true
   syncControls()
 }
 
@@ -272,11 +285,41 @@ addEventListener('pointermove', (e) => {
 const lift = (e: PointerEvent) => { touches.delete(e.pointerId); pinch = spread() }
 addEventListener('pointerup', lift)
 addEventListener('pointercancel', lift)
-addEventListener('resize', () => {
+const resize = () => {
+  gl.setPixelRatio(pr)
   gl.setSize(innerWidth, innerHeight)
   post.setSize(innerWidth, innerHeight)
   frameIso()
-})
+}
+addEventListener('resize', resize)
+
+// ── Adaptive resolution ──────────────────────────────────────────────────
+// If frames run long for a second, drop the pixel ratio a step (never below
+// 1); if they run short for a few seconds, take a step back up. A machine
+// that keeps up never changes.
+
+const frameMs: number[] = []
+let calm = 0
+function adapt(ms: number): void {
+  if (q.has('dpr')) return
+  frameMs.push(ms)
+  if (frameMs.length < 60) return
+  frameMs.sort((a, b) => a - b)
+  const median = frameMs[30]!
+  frameMs.length = 0
+  if (median > 20 && pr > 1) { pr = Math.max(1, pr - 0.125); calm = 0; resize() }
+  else if (median < 12 && pr < PR_MAX && ++calm >= 3) { pr = Math.min(PR_MAX, pr + 0.125); calm = 0; resize() }
+}
+
+// ?stats=1: frame time, draw calls and triangles, pixel ratio.
+const stats = q.get('stats') === '1' ? el('div', 'lab-tag lab-stats') : null
+if (stats) {
+  stats.style.transform = 'translate(8px, 8px)'
+  stats.style.textTransform = 'none'
+  stats.style.letterSpacing = '0.04em'
+  document.body.append(stats)
+}
+const statMs: number[] = []
 
 // ── Loop ─────────────────────────────────────────────────────────────────
 
@@ -284,23 +327,44 @@ apply()
 const v = new Vector3()
 let frames = 0
 let last = 0
+let lastAlpha = ''
 gl.setAnimationLoop((ms) => {
-  const dt = Math.min(0.1, (ms - (last || ms)) / 1000)
+  const frame = ms - (last || ms)
+  const dt = Math.min(0.1, frame / 1000)
   last = ms
+  if (frame > 0) adapt(frame)
+  gl.info.reset()
   if (Math.abs(zoom - zoomTarget) > 0.001) { zoom += (zoomTarget - zoom) * 0.18; frameIso() }
   if (state.scene === 'street') {
     street.update(focus.x, focus.z, night, wet)
     life.update(ms / 1000, dt, night)
     cast.forEach((r, i) => animateWalk(r, i * 1.7, 0, ms / 1000))
     if (rain.mesh.visible) rain.update(ms / 1000, focus.x, focus.z)
+    crowd.sync()
+    if (frames % 2 === 0) shadowsDirty = true
     // Name tags fade as you pull back; from far away they are clutter.
     const alpha = String(1 - Math.min(1, Math.max(0, (zoom - 16) / 5)))
-    for (const [tag, p] of tags) {
-      v.copy(p).project(iso)
-      tag.style.opacity = alpha
-      tag.style.transform = `translate(${((v.x + 1) / 2) * innerWidth}px, ${((1 - v.y) / 2) * innerHeight}px) translate(-50%, -100%)`
+    for (const t of tags) {
+      v.copy(t[1]).project(iso)
+      const css = `translate(${(((v.x + 1) / 2) * innerWidth).toFixed(1)}px, ${(((1 - v.y) / 2) * innerHeight).toFixed(1)}px) translate(-50%, -100%)`
+      if (css === t[2]) continue
+      t[2] = css
+      t[0].style.transform = css
+    }
+    if (alpha !== lastAlpha) for (const [tag] of tags) tag.style.opacity = alpha
+    lastAlpha = alpha
+  }
+  gl.shadowMap.needsUpdate = shadowsDirty
+  shadowsDirty = false
+  post.render(scene, iso, ms / 1000)
+  if (stats && frame > 0) {
+    statMs.push(frame)
+    if (statMs.length === 30) {
+      statMs.sort((a, b) => a - b)
+      const { calls, triangles } = gl.info.render
+      stats.textContent = `${statMs[15]!.toFixed(1)} ms · ${calls} calls · ${(triangles / 1000).toFixed(0)}k tris · ×${pr}`
+      statMs.length = 0
     }
   }
-  post.render(scene, iso, ms / 1000)
   if (++frames === 3) (window as unknown as { labReady: boolean }).labReady = true
 })

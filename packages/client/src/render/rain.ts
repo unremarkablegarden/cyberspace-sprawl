@@ -34,7 +34,9 @@ export class Rain {
       const x = cx + (((s[i * 3]! * SPREAD - cx) % SPREAD) + SPREAD) % SPREAD - SPREAD / 2
       const z = cz + (((s[i * 3 + 1]! * SPREAD - cz) % SPREAD) + SPREAD) % SPREAD - SPREAD / 2
       const y = HEIGHT - ((s[i * 3 + 2]! * HEIGHT + time * SPEED) % HEIGHT)
-      p.set([x, y, z, x + 0.04, y + LENGTH, z + 0.04], i * 6)
+      const o = i * 6
+      p[o] = x; p[o + 1] = y; p[o + 2] = z
+      p[o + 3] = x + 0.04; p[o + 4] = y + LENGTH; p[o + 5] = z + 0.04
     }
     ;(this.mesh.geometry.getAttribute('position') as BufferAttribute).needsUpdate = true
   }

@@ -2,7 +2,7 @@
 // an extruded rounded rectangle with a bevel, so edges catch the light instead
 // of meeting at a hard 90°.
 
-import { ExtrudeGeometry, Shape, type BufferGeometry } from 'three'
+import { BufferGeometry, Color, ExtrudeGeometry, Float32BufferAttribute, Shape } from 'three'
 
 /** A rounded rectangle of w × d centred on the origin, in the XY plane. */
 export function roundedRect(w: number, d: number, r: number): Shape {
@@ -55,3 +55,45 @@ export function slab(w: number, d: number, h: number, corner: number, bevel: num
 export function roundedBox(w: number, h: number, d: number, r: number): BufferGeometry {
   return slab(w, d, h, r * 1.5, r, 4).translate(0, -h / 2, 0)
 }
+
+/**
+ * Many small static meshes as one geometry, so they cost one draw call. Each
+ * piece is placed in world space, painted one colour, and remembers its own
+ * origin in `aLot` for shaders that used to read it from the model matrix.
+ */
+export class Merger {
+  #pos: number[] = []
+  #nor: number[] = []
+  #col: number[] = []
+  #lot: number[] = []
+
+  get empty(): boolean {
+    return this.#pos.length === 0
+  }
+
+  add(geo: BufferGeometry, x: number, y: number, z: number, rotY = 0, color: Color = WHITE): void {
+    const g = geo.index ? geo.toNonIndexed() : geo
+    const p = g.getAttribute('position'), n = g.getAttribute('normal')
+    const c = Math.cos(rotY), s = Math.sin(rotY)
+    for (let i = 0; i < p.count; i++) {
+      const px = p.getX(i), pz = p.getZ(i), nx = n.getX(i), nz = n.getZ(i)
+      this.#pos.push(x + px * c + pz * s, y + p.getY(i), z - px * s + pz * c)
+      this.#nor.push(nx * c + nz * s, n.getY(i), -nx * s + nz * c)
+      this.#col.push(color.r, color.g, color.b)
+      this.#lot.push(x, y, z)
+    }
+    if (g !== geo) g.dispose()
+  }
+
+  build(): BufferGeometry {
+    const g = new BufferGeometry()
+    g.setAttribute('position', new Float32BufferAttribute(this.#pos, 3))
+    g.setAttribute('normal', new Float32BufferAttribute(this.#nor, 3))
+    g.setAttribute('color', new Float32BufferAttribute(this.#col, 3))
+    g.setAttribute('aLot', new Float32BufferAttribute(this.#lot, 3))
+    g.computeBoundingSphere()
+    g.computeBoundingBox()
+    return g
+  }
+}
+const WHITE = new Color(1, 1, 1)

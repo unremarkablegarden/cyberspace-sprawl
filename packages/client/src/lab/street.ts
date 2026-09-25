@@ -12,7 +12,7 @@ import {
 } from 'three'
 import { hashString, PropKind, Tile, type DistrictMap, type Prop } from '@sprawl/shared'
 import { hazed, haze } from './haze.ts'
-import { roundedBox, slab } from './shapes.ts'
+import { Merger, roundedBox, slab } from './shapes.ts'
 
 /** World height of one storey. People are about 1.0 tall. */
 export const STOREY = 1.05
@@ -35,18 +35,21 @@ const CUT = /* glsl */ `
     return smoothstep(0.3, 1.8, ahead) * (1.0 - smoothstep(7.0, 10.0, across)) * (1.0 - smoothstep(30.0, 34.0, ahead));
   }`
 
-/** Concrete with ribbon windows, lit at night; takes the cutaway. */
-function facade(hex: number, key: string): MeshStandardMaterial {
-  const m = new MeshStandardMaterial({ color: hex, roughness: 0.9 })
-  return hazed(m, `facade-${key}`, (shader) => {
+/**
+ * Concrete with ribbon windows, lit at night; takes the cutaway. Drawn on
+ * merged geometry: the concrete colour comes per vertex, and `aLot` carries
+ * each piece's origin for the cutaway.
+ */
+function facade(): MeshStandardMaterial {
+  const m = new MeshStandardMaterial({ roughness: 0.9, vertexColors: true })
+  return hazed(m, 'facade', (shader) => {
     shader.uniforms.uFocus = focus
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\nvarying vec3 vFW;\nvarying vec3 vFN;\n${CUT}`)
+      .replace('#include <common>', `#include <common>\nattribute vec3 aLot;\nvarying vec3 vFW;\nvarying vec3 vFN;\n${CUT}`)
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
-        float cut = cutaway(vec2(modelMatrix[3].x, modelMatrix[3].z));
-        transformed.y = mix(transformed.y, min(transformed.y, 0.35 - modelMatrix[3].y), cut);`,
+        transformed.y = mix(transformed.y, min(transformed.y, 0.35), cutaway(aLot.xz));`,
       )
       .replace(
         '#include <project_vertex>',
@@ -59,6 +62,7 @@ function facade(hex: number, key: string): MeshStandardMaterial {
       .replace(
         'vec3 totalEmissiveRadiance = emissive;',
         `vec3 totalEmissiveRadiance = emissive;
+        diffuseColor.rgb *= vColor.rgb;
         {
           float wall = smoothstep(0.6, 0.3, abs(vFN.y));
           vec2 tang = normalize(vec2(-vFN.z, vFN.x) + 1e-5);
@@ -83,6 +87,8 @@ function facade(hex: number, key: string): MeshStandardMaterial {
           diffuseColor.rgb *= mix(1.0, 0.8, 1.0 - wall);
         }`,
       )
+      // Applied above, before the windows are painted in.
+      .replace('#include <color_fragment>', '')
   })
 }
 
@@ -256,16 +262,27 @@ export function buildStreet(map: DistrictMap): Street {
   group.add(outer, ground)
 
   // Buildings: each block split into lots; each lot a podium and a tower.
-  const facades = CONCRETE.map((hex, i) => facade(hex, String(i)))
+  // Everything static is merged per 16-tile chunk: one draw for the concrete,
+  // one for the roof kit, and the chunks still cull off-screen.
+  const facadeMat = facade()
   const roofMat = hazed(new MeshStandardMaterial({ color: 0x9c998f, roughness: 0.8 }), 'roofkit')
-  const heightAt = (x: number, y: number) => map.heights[y * map.width + x] ?? 1
-  const add = (geo: BufferGeometry, mat: Material, x: number, z: number, y = 0) => {
-    const m = new Mesh(geo, mat)
-    m.position.set(x, y, z)
-    m.castShadow = m.receiveShadow = true
-    group.add(m)
-    return m
+  const concrete = CONCRETE.map((hex) => new Color().setHex(hex))
+  const chunks = new Map<string, { walls: Merger; roof: Merger }>()
+  const chunk = (x: number, z: number) => {
+    const k = `${Math.floor(x / 16)}:${Math.floor(z / 16)}`
+    let c = chunks.get(k)
+    if (!c) chunks.set(k, (c = { walls: new Merger(), roof: new Merger() }))
+    return c
   }
+  const wall = (geo: BufferGeometry, tint: Color, x: number, z: number, y = 0) => {
+    chunk(x, z).walls.add(geo, x, y, z, 0, tint)
+    geo.dispose()
+  }
+  const kit = (geo: BufferGeometry, x: number, z: number, y: number) => {
+    chunk(x, z).roof.add(geo, x, y, z)
+    geo.dispose()
+  }
+  const heightAt = (x: number, y: number) => map.heights[y * map.width + x] ?? 1
   for (const [bx0, by0, bx1, by1] of blocks(map, Tile.Building)) {
     const long = bx1 - bx0 >= by1 - by0
     const len = long ? bx1 - bx0 + 1 : by1 - by0 + 1
@@ -280,23 +297,23 @@ export function buildStreet(map: DistrictMap): Street {
       let hSum = 0
       for (let y = ly0; y <= ly1; y++) for (let x = lx0; x <= lx1; x++) hSum += heightAt(x, y)
       const storeys = Math.max(2, Math.round((hSum / (w * d)) * 1.5 + ((h >>> 3) % 3)))
-      const mat = facades[(h >>> 5) % facades.length]!
+      const tint = concrete[(h >>> 5) % concrete.length]!
       const corner = [0.08, 0.25, 0.5][(h >>> 7) % 3]!
       const podium = Math.min(storeys, 2) * STOREY
-      add(slab(w - 0.06, d - 0.06, podium, corner * 0.5, 0.03), mat, cx, cz)
+      wall(slab(w - 0.06, d - 0.06, podium, corner * 0.5, 0.03), tint, cx, cz)
       if (storeys > 2 && w > 1.5 && d > 1.5) {
         const inset = 0.3 + ((h >>> 9) % 3) * 0.12
         const tw = Math.max(1, w - inset * 2), td = Math.max(1, d - inset * 2)
         const top = storeys * STOREY
-        add(slab(tw, td, top - podium, corner, 0.04, 10), mat, cx, cz, podium)
+        wall(slab(tw, td, top - podium, corner, 0.04, 10), tint, cx, cz, podium)
         // A setback crown on the tallest.
         const crown = storeys > 7
-        if (crown) add(slab(tw * 0.6, td * 0.6, 1.4 * STOREY, corner, 0.04, 10), mat, cx, cz, top)
+        if (crown) wall(slab(tw * 0.6, td * 0.6, 1.4 * STOREY, corner, 0.04, 10), tint, cx, cz, top)
         // Roof kit: a plant box and sometimes a water tank.
         const roofY = top + (crown ? 1.4 * STOREY : 0)
         const kw = crown ? tw * 0.6 : tw, kd = crown ? td * 0.6 : td
-        add(roundedBox(0.35, 0.22, 0.25, 0.03), roofMat, cx - kw * 0.2, cz + kd * 0.15, roofY + 0.11)
-        if ((h >>> 11) % 2) add(new CylinderGeometry(0.16, 0.16, 0.34, 16), roofMat, cx + kw * 0.2, cz - kd * 0.15, roofY + 0.17)
+        kit(roundedBox(0.35, 0.22, 0.25, 0.03), cx - kw * 0.2, cz + kd * 0.15, roofY + 0.11)
+        if ((h >>> 11) % 2) kit(new CylinderGeometry(0.16, 0.16, 0.34, 16), cx + kw * 0.2, cz - kd * 0.15, roofY + 0.17)
       }
     }
   }
@@ -305,23 +322,44 @@ export function buildStreet(map: DistrictMap): Street {
   // white pods hung off them, each with a round window.
   const podMat = hazed(new MeshStandardMaterial({ color: 0xe4e0d6, roughness: 0.45 }), 'pod')
   const portMat = hazed(new MeshStandardMaterial({ color: 0x1c1d1f, roughness: 0.2, metalness: 0.4 }), 'port')
+  const podAt: [number, number, number, number][] = [] // x, y, z, quarter turns
+  const portAt: [number, number, number, number][] = []
   for (const [bx0, by0, bx1, by1] of blocks(map, Tile.Capsule)) {
     const cx = (bx0 + bx1) / 2, cz = (by0 + by1) / 2
     const floors = 8
     const cores = [cx - 1.2, cx + 1.2]
-    for (const x of cores) add(slab(0.9, 0.9, floors * 0.62 + 0.8, 0.12, 0.03), facades[3]!, x, cz)
-    const pod = roundedBox(0.72, 0.56, 0.56, 0.09)
-    const port = new CylinderGeometry(0.15, 0.15, 0.03, 20).rotateX(Math.PI / 2)
+    for (const x of cores) wall(slab(0.9, 0.9, floors * 0.62 + 0.8, 0.12, 0.03), concrete[3]!, x, cz)
     let n = 0
     for (let f = 0; f < floors; f++)
       for (const x of cores)
         for (const [ox, oz, ry] of [[0, 0.72, 0], [0.72, 0, 1], [-0.72, 0, 1], [0, -0.72, 0]] as const) {
           if ((hashString(`pod:${x}:${f}:${ox}:${oz}`) >>> 0) % 5 === 0) continue
           const px = x + ox, pz = cz + oz, py = 0.5 + f * 0.62 + (n++ % 2) * 0.04
-          add(pod, podMat, px, pz, py).rotation.y = (ry * Math.PI) / 2
-          const w = add(port, portMat, px + ox * 0.51, pz + oz * 0.51, py + 0.02)
-          w.rotation.y = ry ? Math.PI / 2 : 0
+          podAt.push([px, py, pz, ry])
+          portAt.push([px + ox * 0.51, py + 0.02, pz + oz * 0.51, ry])
         }
+  }
+  const pods = inst(roundedBox(0.72, 0.56, 0.56, 0.09), podMat, podAt.length)
+  const ports = inst(new CylinderGeometry(0.15, 0.15, 0.03, 20).rotateX(Math.PI / 2), portMat, portAt.length)
+  for (const [m, at] of [[pods, podAt], [ports, portAt]] as const)
+    at.forEach(([x, y, z, ry], i) => {
+      tmp.position.set(x, y, z)
+      tmp.rotation.set(0, (ry * Math.PI) / 2, 0)
+      tmp.updateMatrix()
+      m.setMatrixAt(i, tmp.matrix)
+    })
+  tmp.rotation.set(0, 0, 0)
+  pods.castShadow = pods.receiveShadow = true
+  ports.receiveShadow = true
+  group.add(pods, ports)
+  for (const { walls, roof } of chunks.values()) {
+    const w = new Mesh(walls.build(), facadeMat)
+    w.castShadow = w.receiveShadow = true
+    group.add(w)
+    if (roof.empty) continue
+    const r = new Mesh(roof.build(), roofMat)
+    r.castShadow = r.receiveShadow = true
+    group.add(r)
   }
 
   // Blade signs sticking out from the facade.
@@ -485,6 +523,9 @@ export function buildStreet(map: DistrictMap): Street {
   const wireGeo = new BufferGeometry()
   wireGeo.setAttribute('position', new BufferAttribute(new Float32Array(pts), 3))
   group.add(new LineSegments(wireGeo, hazed(new LineBasicMaterial({ color: 0x1c1b1a }), 'wire')))
+
+  // Nothing here moves: skip the per-frame matrix work.
+  group.traverse((o) => { o.updateMatrix(); o.matrixAutoUpdate = false })
 
   return {
     group,

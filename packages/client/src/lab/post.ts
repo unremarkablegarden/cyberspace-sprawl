@@ -18,24 +18,32 @@ export class Post {
   exposure = 1.0
   bloom = 0.6
   #scene = target(4)
-  #bright = target()
+  #soft = target()
   #blurA = [target(), target()]
   #blurB = [target(), target()]
   #quad = new Mesh(new PlaneGeometry(2, 2))
   #quadScene = new Scene()
   #cam = new OrthographicCamera(-1, 1, 1, -1, 0, 1)
 
-  #brightMat = new ShaderMaterial({
-    uniforms: { tSrc: { value: null }, uThreshold: { value: 0.85 } },
+  // Straight from full size to a quarter: four bilinear taps cover the 4×4
+  // source pixels under each output pixel. The bright pass keeps only what
+  // is over the threshold, tap by tap, so thin lit windows still bloom.
+  #downMat = (bright: boolean) => new ShaderMaterial({
+    uniforms: { tSrc: { value: null }, uTexel: { value: new Vector2() }, uThreshold: { value: 0.85 } },
     vertexShader: VERT,
     fragmentShader: /* glsl */ `
-      uniform sampler2D tSrc; uniform float uThreshold; varying vec2 vUv;
+      uniform sampler2D tSrc; uniform vec2 uTexel; uniform float uThreshold; varying vec2 vUv;
+      vec3 tap(vec2 o) {
+        vec3 c = texture2D(tSrc, vUv + o * uTexel).rgb;
+        ${bright ? 'c *= smoothstep(uThreshold, uThreshold + 0.6, dot(c, vec3(0.2126, 0.7152, 0.0722)));' : ''}
+        return c;
+      }
       void main() {
-        vec3 c = texture2D(tSrc, vUv).rgb;
-        float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-        gl_FragColor = vec4(c * smoothstep(uThreshold, uThreshold + 0.6, l), 1.0);
+        gl_FragColor = vec4((tap(vec2(-1.0, -1.0)) + tap(vec2(1.0, -1.0)) + tap(vec2(-1.0, 1.0)) + tap(vec2(1.0, 1.0))) * 0.25, 1.0);
       }`,
   })
+  #brightMat = this.#downMat(true)
+  #boxMat = this.#downMat(false)
 
   #blurMat = new ShaderMaterial({
     uniforms: { tSrc: { value: null }, uDir: { value: new Vector2() } },
@@ -94,7 +102,8 @@ export class Post {
     const pr = this.gl.getPixelRatio()
     const W = Math.floor(w * pr), H = Math.floor(h * pr)
     this.#scene.setSize(W, H)
-    this.#bright.setSize(W >> 1, H >> 1)
+    this.#soft.setSize(W >> 2, H >> 2)
+    for (const m of [this.#brightMat, this.#boxMat]) m.uniforms.uTexel!.value.set(1 / W, 1 / H)
     for (const t of this.#blurA) t.setSize(W >> 2, H >> 2)
     for (const t of this.#blurB) t.setSize(W >> 3, H >> 3)
     this.#finalMat.uniforms.uRes!.value.set(W, H)
@@ -125,25 +134,30 @@ export class Post {
     this.gl.setRenderTarget(this.#scene)
     this.gl.render(scene, camera)
 
-    // Bloom: bright pass at half size, blurred at a quarter and an eighth.
+    // Bloom: bright pass straight to a quarter, blurred there and at an eighth.
+    const [qa, qb] = this.#blurA as [WebGLRenderTarget, WebGLRenderTarget]
     this.#brightMat.uniforms.tSrc!.value = this.#scene.texture
-    this.#pass(this.#brightMat, this.#bright)
-    this.#blur(this.#bright, this.#blurA, 2)
-    this.#blur(this.#blurA[1]!, this.#blurB, 2)
+    this.#pass(this.#brightMat, qb)
+    this.#blur(qb, this.#blurA, 2)
+    this.#blur(qb, this.#blurB, 2)
 
-    // A soft copy of the scene for the tilt-shift, reusing the bright target.
-    this.#blurMat.uniforms.tSrc!.value = this.#scene.texture
-    this.#blurMat.uniforms.uDir!.value.set(1.5 / this.#bright.width, 0)
-    this.#pass(this.#blurMat, this.#bright)
-    this.#blurMat.uniforms.tSrc!.value = this.#bright.texture
-    this.#blurMat.uniforms.uDir!.value.set(0, 1.5 / this.#bright.height)
-    const softTarget = this.#blurA[0]!
-    this.#pass(this.#blurMat, softTarget)
+    // A soft copy of the scene for the tilt-shift, at a quarter. The blur
+    // steps match the old half-size chain: three full-size pixels.
+    this.#boxMat.uniforms.tSrc!.value = this.#scene.texture
+    this.#pass(this.#boxMat, this.#soft)
+    const u = this.#blurMat.uniforms
+    u.tSrc!.value = this.#soft.texture
+    u.uDir!.value.set(0.75 / qa.width, 0)
+    this.#pass(this.#blurMat, qa)
+    u.tSrc!.value = qa.texture
+    u.uDir!.value.set(0, 0.75 / qa.height)
+    this.#pass(this.#blurMat, this.#soft)
+    const softTarget = this.#soft
 
     const f = this.#finalMat.uniforms
     f.tScene!.value = this.#scene.texture
     f.tSoft!.value = softTarget.texture
-    f.tBloomA!.value = this.#blurA[1]!.texture
+    f.tBloomA!.value = qb.texture
     f.tBloomB!.value = this.#blurB[1]!.texture
     f.uExposure!.value = this.exposure
     f.uBloom!.value = this.bloom

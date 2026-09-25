@@ -4,13 +4,13 @@
 // steam rises from grates in the road.
 
 import {
-  AdditiveBlending, CanvasTexture, CylinderGeometry, Group, Mesh, MeshBasicMaterial, MeshStandardMaterial,
-  NormalBlending, PlaneGeometry, Sprite, SpriteMaterial, Vector3, type Texture,
+  AdditiveBlending, CanvasTexture, Color, CylinderGeometry, DynamicDrawUsage, Group, InstancedMesh, Mesh, MeshBasicMaterial, MeshStandardMaterial,
+  NormalBlending, Object3D, PlaneGeometry, Sprite, SpriteMaterial, Vector3, type BufferGeometry, type Material, type Matrix4, type Texture,
 } from 'three'
 import { findPath, hashString, Tile, type DistrictMap, type XY } from '@sprawl/shared'
-import { animateWalk, buildFigure, type FigureSpec, type Rig } from './figure.ts'
+import { animateWalk, buildFigure, type Crowd, type FigureSpec, type Rig } from './figure.ts'
 import { hazed } from './haze.ts'
-import { roundedBox, slab } from './shapes.ts'
+import { Merger, roundedBox, slab } from './shapes.ts'
 
 let seed = 1234
 const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647
@@ -75,13 +75,12 @@ function straighten(ok: (x: number, y: number) => boolean, from: [number, number
 // ── Cars ───────────────────────────────────────────────────────────────────
 
 interface Car {
-  root: Group
   axis: 'x' | 'z'
   dir: 1 | -1
   lane: number
   pos: number
   speed: number
-  beams: Mesh
+  taxi: number
 }
 
 function cone(): CanvasTexture {
@@ -102,38 +101,71 @@ function cone(): CanvasTexture {
   return new CanvasTexture(c)
 }
 
-function buildCar(kind: 'car' | 'taxi', paint: number, beamTex: Texture): { root: Group; beams: Mesh } {
-  const root = new Group()
-  const body = new Mesh(slab(0.95, 0.44, 0.2, 0.1, 0.05, 8), hazed(new MeshStandardMaterial({ color: paint, roughness: 0.35, metalness: 0.3 }), 'car'))
-  body.position.y = 0.06
-  body.castShadow = true
-  const cabin = new Mesh(slab(0.52, 0.38, 0.17, 0.08, 0.05, 8), hazed(new MeshStandardMaterial({ color: 0x16181a, roughness: 0.15, metalness: 0.5 }), 'glass'))
-  cabin.position.set(-0.06, 0.25, 0)
-  cabin.castShadow = true
-  root.add(body, cabin)
-  for (const [x, z] of [[0.3, 0.2], [0.3, -0.2], [-0.3, 0.2], [-0.3, -0.2]] as const) {
-    const w = new Mesh(new CylinderGeometry(0.09, 0.09, 0.06, 14).rotateX(Math.PI / 2), hazed(new MeshStandardMaterial({ color: 0x111111 }), 'tyre'))
-    w.position.set(x, 0.09, z)
-    root.add(w)
+/**
+ * All the cars, one instanced mesh per part: body (painted per car), cabin,
+ * wheels, head- and tail-lamps, the taxi sign and the headlight beams.
+ */
+function buildFleet(paints: number[], taxis: number, beamTex: Texture) {
+  const n = paints.length
+  const merged = (geo: () => BufferGeometry, at: [number, number, number][]) => {
+    const m = new Merger()
+    for (const [x, y, z] of at) {
+      const g = geo()
+      m.add(g, x, y, z)
+      g.dispose()
+    }
+    return m.build()
   }
-  const head = hazed(new MeshBasicMaterial({ color: 0xfff2d8 }), 'headlamp')
-  const tail = hazed(new MeshBasicMaterial({ color: 0xff3a2a }), 'taillamp')
-  for (const z of [-0.14, 0.14]) {
-    const h = new Mesh(roundedBox(0.02, 0.05, 0.1, 0.01), head)
-    h.position.set(0.475, 0.16, z)
-    const t = new Mesh(roundedBox(0.02, 0.04, 0.1, 0.01), tail)
-    t.position.set(-0.475, 0.17, z)
-    root.add(h, t)
+  const part = (geo: BufferGeometry, mat: Material, count = n, shadow = false) => {
+    const mesh = new InstancedMesh(geo, mat, Math.max(1, count))
+    mesh.count = count
+    mesh.castShadow = shadow
+    mesh.frustumCulled = false
+    mesh.instanceMatrix.setUsage(DynamicDrawUsage)
+    return mesh
   }
-  if (kind === 'taxi') {
-    const lamp = new Mesh(roundedBox(0.14, 0.06, 0.08, 0.02), hazed(new MeshBasicMaterial({ color: 0xffb35c }), 'taxilamp'))
-    lamp.position.set(-0.04, 0.37, 0)
-    root.add(lamp)
+  const body = part(
+    slab(0.95, 0.44, 0.2, 0.1, 0.05, 8).translate(0, 0.06, 0),
+    hazed(new MeshStandardMaterial({ roughness: 0.35, metalness: 0.3 }), 'car'), n, true,
+  )
+  const colour = new Color()
+  paints.forEach((hex, i) => body.setColorAt(i, colour.setHex(hex)))
+  const cabin = part(
+    slab(0.52, 0.38, 0.17, 0.08, 0.05, 8).translate(-0.06, 0.25, 0),
+    hazed(new MeshStandardMaterial({ color: 0x16181a, roughness: 0.15, metalness: 0.5 }), 'glass'), n, true,
+  )
+  const wheels = part(
+    merged(() => new CylinderGeometry(0.09, 0.09, 0.06, 14).rotateX(Math.PI / 2), [[0.3, 0.09, 0.2], [0.3, 0.09, -0.2], [-0.3, 0.09, 0.2], [-0.3, 0.09, -0.2]]),
+    hazed(new MeshStandardMaterial({ color: 0x111111 }), 'tyre'),
+  )
+  const heads = part(
+    merged(() => roundedBox(0.02, 0.05, 0.1, 0.01), [[0.475, 0.16, -0.14], [0.475, 0.16, 0.14]]),
+    hazed(new MeshBasicMaterial({ color: 0xfff2d8 }), 'headlamp'),
+  )
+  const tails = part(
+    merged(() => roundedBox(0.02, 0.04, 0.1, 0.01), [[-0.475, 0.17, -0.14], [-0.475, 0.17, 0.14]]),
+    hazed(new MeshBasicMaterial({ color: 0xff3a2a }), 'taillamp'),
+  )
+  const signs = part(roundedBox(0.14, 0.06, 0.08, 0.02).translate(-0.04, 0.37, 0), hazed(new MeshBasicMaterial({ color: 0xffb35c }), 'taxilamp'), taxis)
+  const beamMat = new MeshBasicMaterial({ map: beamTex, transparent: true, depthWrite: false, blending: AdditiveBlending })
+  const beams = part(new PlaneGeometry(2.2, 1.1).rotateX(-Math.PI / 2).translate(0.48 + 1.1, 0.012, 0), beamMat)
+  const all = [body, cabin, wheels, heads, tails, beams]
+  const group = new Group()
+  group.add(...all, signs)
+  return {
+    group,
+    beamMat,
+    beams,
+    /** Place car `i`; `taxi` is its index among the taxis, or -1. */
+    set(i: number, taxi: number, m: Matrix4) {
+      for (const mesh of all) mesh.setMatrixAt(i, m)
+      if (taxi >= 0) signs.setMatrixAt(taxi, m)
+    },
+    commit() {
+      for (const mesh of all) mesh.instanceMatrix.needsUpdate = true
+      signs.instanceMatrix.needsUpdate = true
+    },
   }
-  const beams = new Mesh(new PlaneGeometry(2.2, 1.1).rotateX(-Math.PI / 2), new MeshBasicMaterial({ map: beamTex, transparent: true, depthWrite: false, blending: AdditiveBlending }))
-  beams.position.set(0.48 + 1.1, 0.012, 0)
-  root.add(beams)
-  return { root, beams }
 }
 
 // ── Steam ──────────────────────────────────────────────────────────────────
@@ -157,7 +189,7 @@ export interface Life {
   update(time: number, dt: number, night: number): void
 }
 
-export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture): Life {
+export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture, crowd: Crowd): Life {
   const group = new Group()
   const foot = footway(map)
 
@@ -172,10 +204,9 @@ export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture): Life
       skin: pick(SKINS), coat: pick(COATS), legs: pick([0x161615, 0x2e2f33, 0x3d2c29, 0x1f2a36]), hair: pick(HAIR),
       hairStyle: Math.floor(rnd() * 3), coatLength: rnd() > 0.5 ? 1 : 0, height: 0.92 + rnd() * 0.14,
     }
-    const root = buildFigure(spec, blob)
+    const root = buildFigure(spec, blob, crowd)
     const [x, y] = pick(near)
     root.position.set(x, 0, y)
-    group.add(root)
     walkers.push({ root, rig: root.userData.rig as Rig, path: [], speed: 0.9 + rnd() * 0.5, wait: rnd() * 3, phase: rnd() * 6, heading: rnd() * 6 })
   }
 
@@ -194,15 +225,18 @@ export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture): Life
   }
   const beamTex = cone()
   const cars: Car[] = []
+  const paints: number[] = []
   const PAINT = [0xd8d4ca, 0x2a2b2d, 0x5a1f1f, 0x8c8a84, 0x3a4a3c, 0x1d2a3a]
+  let taxis = 0
   for (let i = 0; i < Math.min(14, lanes.length * 2); i++) {
     const lane = lanes[i % lanes.length]!
     const taxi = rnd() < 0.35
-    const { root, beams } = buildCar(taxi ? 'taxi' : 'car', taxi ? pick([0x1b1b1d, 0x5e2424]) : pick(PAINT), beamTex)
-    root.rotation.y = lane.axis === 'x' ? (lane.dir > 0 ? 0 : Math.PI) : lane.dir > 0 ? -Math.PI / 2 : Math.PI / 2
-    group.add(root)
-    cars.push({ root, axis: lane.axis, dir: lane.dir, lane: lane.at, pos: rnd() * map.width, speed: 2 + rnd() * 1.5, beams })
+    paints.push(taxi ? pick([0x1b1b1d, 0x5e2424]) : pick(PAINT))
+    cars.push({ axis: lane.axis, dir: lane.dir, lane: lane.at, pos: rnd() * map.width, speed: 2 + rnd() * 1.5, taxi: taxi ? taxis++ : -1 })
   }
+  const fleet = buildFleet(paints, taxis, beamTex)
+  group.add(fleet.group)
+  const carAt = new Object3D()
 
   // Steam from a few grates in the road near the player.
   const puffTex = puffTexture()
@@ -258,16 +292,20 @@ export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture): Life
         animateWalk(w.rig, w.phase, 1, time)
       }
 
-      for (const c of cars) {
+      cars.forEach((c, i) => {
         c.pos += c.dir * c.speed * dt
         const len = c.axis === 'x' ? map.width : map.height
         if (c.pos > len + 6) c.pos = -6
         if (c.pos < -6) c.pos = len + 6
-        if (c.axis === 'x') c.root.position.set(c.pos, 0, c.lane)
-        else c.root.position.set(c.lane, 0, c.pos)
-        ;(c.beams.material as MeshBasicMaterial).opacity = night * 0.28
-        c.beams.visible = night > 0.05
-      }
+        if (c.axis === 'x') carAt.position.set(c.pos, 0, c.lane)
+        else carAt.position.set(c.lane, 0, c.pos)
+        carAt.rotation.y = c.axis === 'x' ? (c.dir > 0 ? 0 : Math.PI) : c.dir > 0 ? -Math.PI / 2 : Math.PI / 2
+        carAt.updateMatrix()
+        fleet.set(i, c.taxi, carAt.matrix)
+      })
+      fleet.commit()
+      fleet.beamMat.opacity = night * 0.28
+      fleet.beams.visible = night > 0.05
 
       for (const p of puffs) {
         const t = (time * 0.25 + p.t0) % 1
