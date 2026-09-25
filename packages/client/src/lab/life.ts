@@ -5,7 +5,7 @@
 
 import {
   AdditiveBlending, CanvasTexture, Color, CylinderGeometry, DynamicDrawUsage, Group, InstancedMesh, MeshBasicMaterial, MeshStandardMaterial,
-  InstancedBufferAttribute, NormalBlending, Object3D, PlaneGeometry, Vector3, type Quaternion, type BufferGeometry, type Material, type Matrix4, type Texture,
+  InstancedBufferAttribute, NormalBlending, Object3D, PlaneGeometry, SpotLight, Vector3, type Quaternion, type BufferGeometry, type Material, type Matrix4, type Texture,
 } from 'three'
 import { findPath, hashString, Tile, type DistrictMap, type XY } from '@sprawl/shared'
 import { animateWalk, buildFigure, type Crowd, type FigureSpec, type Rig } from './figure.ts'
@@ -75,6 +75,8 @@ function straighten(ok: (x: number, y: number) => boolean, from: [number, number
 // ── Cars ───────────────────────────────────────────────────────────────────
 
 interface Car {
+  /** Not drawn: the car's transform, for the fleet and the headlights. */
+  root: Object3D
   axis: 'x' | 'z'
   dir: 1 | -1
   lane: number
@@ -233,11 +235,23 @@ export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture, crowd
     const lane = lanes[i % lanes.length]!
     const taxi = rnd() < 0.35
     paints.push(taxi ? pick([0x1b1b1d, 0x5e2424]) : pick(PAINT))
-    cars.push({ axis: lane.axis, dir: lane.dir, lane: lane.at, pos: rnd() * map.width, speed: 2 + rnd() * 1.5, taxi: taxi ? taxis++ : -1 })
+    const root = new Object3D()
+    root.rotation.y = lane.axis === 'x' ? (lane.dir > 0 ? 0 : Math.PI) : lane.dir > 0 ? -Math.PI / 2 : Math.PI / 2
+    cars.push({ root, axis: lane.axis, dir: lane.dir, lane: lane.at, pos: rnd() * map.width, speed: 2 + rnd() * 1.5, taxi: taxi ? taxis++ : -1 })
   }
   const fleet = buildFleet(paints, taxis, beamTex)
   group.add(fleet.group)
-  const carAt = new Object3D()
+
+  // Real headlights on the cars nearest the focus: a fixed pool (constant
+  // light count, so no shader recompiles), faded out towards its reach.
+  const HEADLIGHTS = 6, REACH = 14
+  const headlights = Array.from({ length: HEADLIGHTS }, () => {
+    const l = new SpotLight(0xfff0d8, 0, 12, 0.5, 0.5, 2)
+    group.add(l, l.target)
+    return l
+  })
+  const byDistance = cars.map((_, i) => i)
+  const carDist = (c: Car) => Math.hypot(c.root.position.x - focus.x, c.root.position.z - focus.z)
 
   // Steam from a few grates in the road near the player.
   const puffTex = puffTexture()
@@ -319,15 +333,26 @@ export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture, crowd
         const len = c.axis === 'x' ? map.width : map.height
         if (c.pos > len + 6) c.pos = -6
         if (c.pos < -6) c.pos = len + 6
-        if (c.axis === 'x') carAt.position.set(c.pos, 0, c.lane)
-        else carAt.position.set(c.lane, 0, c.pos)
-        carAt.rotation.y = c.axis === 'x' ? (c.dir > 0 ? 0 : Math.PI) : c.dir > 0 ? -Math.PI / 2 : Math.PI / 2
-        carAt.updateMatrix()
-        fleet.set(i, c.taxi, carAt.matrix)
+        if (c.axis === 'x') c.root.position.set(c.pos, 0, c.lane)
+        else c.root.position.set(c.lane, 0, c.pos)
+        c.root.updateMatrixWorld()
+        fleet.set(i, c.taxi, c.root.matrix)
       })
       fleet.commit()
-      fleet.beamMat.opacity = night * 0.28
+      // The real light does the lighting; the beam is only the glow in the haze.
+      fleet.beamMat.opacity = night * 0.2
       fleet.beams.visible = night > 0.05
+      byDistance.sort((a, b) => carDist(cars[a]!) - carDist(cars[b]!))
+      headlights.forEach((l, k) => {
+        // Visible all night or not at all: three builds shaders for the number
+        // of visible lights, so switching them one by one recompiles everything.
+        l.visible = night > 0.05
+        const c = cars[byDistance[k]!]
+        if (!c || !l.visible) { l.intensity = 0; return }
+        c.root.localToWorld(l.position.set(0.5, 0.18, 0))
+        c.root.localToWorld(l.target.position.set(4, 0, 0))
+        l.intensity = 55 * night * (1 - Math.min(1, Math.max(0, (carDist(c) - REACH + 3) / 3)))
+      })
 
       puffs.forEach((p, i) => {
         const t = (time * 0.25 + p.t0) % 1

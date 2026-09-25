@@ -7,8 +7,9 @@
 
 import {
   AdditiveBlending, BufferAttribute, BufferGeometry, CanvasTexture, LineBasicMaterial, LineSegments, Color, CylinderGeometry, Group, IcosahedronGeometry, InstancedMesh, Mesh,
-  MeshBasicMaterial, MeshStandardMaterial, Object3D, PlaneGeometry, SRGBColorSpace, Vector2,
-  type Material,
+  DataTexture, FloatType, Matrix4, MeshBasicMaterial, MeshDepthMaterial, MeshStandardMaterial, Object3D, PlaneGeometry, RedFormat,
+  RGBADepthPacking, SpotLight, SRGBColorSpace, Vector2, Vector3,
+  type Material, type Texture, type WebGLProgramParametersWithUniforms,
 } from 'three'
 import { hashString, PropKind, Tile, type DistrictMap, type Prop } from '@sprawl/shared'
 import { hazed, haze } from './haze.ts'
@@ -18,38 +19,118 @@ import { Merger, roundedBox, slab } from './shapes.ts'
 export const STOREY = 1.05
 
 const CONCRETE = [0x8a8780, 0x7c7a74, 0x9a968d, 0x6f6d68, 0x85817a]
-// Signs: mostly the warm Chiba set, with the odd paid-for cyan or magenta.
-const SIGN_WARM = [0xf09a3a, 0xe6dcc0, 0xc2412f, 0x8fc58a, 0xe0b85a, 0xd06a30]
+// Signs: a muted warm Chiba set, the odd paid-for cyan or magenta, and about a
+// third dead, because nobody paid that month.
+const SIGN_WARM = [0xd89a4a, 0xd8d0b8, 0x9c4a38, 0x8fa88a, 0xc8a860, 0xb87a48]
 const SIGN_LOUD = [0x4fd6e0, 0xe04f9a]
+const SIGN_DEAD = 0x2a2826
+
+/** Sign colour for a spot, or null when the sign is dead (unlit). */
+function signHex(p: Prop): number | null {
+  const r = (hashString(`sign:${p.x}:${p.y}`) >>> 0) % 100
+  if (r < 5) return SIGN_LOUD[r % 2]!
+  if (r >= 66) return null
+  return SIGN_WARM[p.hue % SIGN_WARM.length]!
+}
 
 // ── Cutaway: buildings between the camera and the player drop to a low
 // podium, like the Sims' walls-down view. ──────────────────────────────────
 
 const focus = { value: new Vector2() }
+/** Ground-plane direction from the focus towards the camera. */
+const view = { value: new Vector2(Math.SQRT1_2, Math.SQRT1_2) }
 const CUT = /* glsl */ `
-  uniform vec2 uFocus;
+  uniform vec2 uFocus, uView;
   float cutaway(vec2 pos) {
     vec2 rel = pos - uFocus;
-    float ahead = dot(rel, vec2(0.7071, 0.7071));
-    float across = abs(dot(rel, vec2(0.7071, -0.7071)));
+    float ahead = dot(rel, uView);
+    float across = abs(dot(rel, vec2(uView.y, -uView.x)));
     return smoothstep(0.3, 1.8, ahead) * (1.0 - smoothstep(7.0, 10.0, across)) * (1.0 - smoothstep(30.0, 34.0, ahead));
   }`
 
+const smooth = (a: number, b: number, x: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t) }
+
+/** The cutaway's target for a spot on the ground: the same sum as CUT, in JS. */
+function cutAt(x: number, z: number): number {
+  const rx = x - focus.value.x, rz = z - focus.value.y
+  const ahead = rx * view.value.x + rz * view.value.y
+  const across = Math.abs(rx * view.value.y - rz * view.value.x)
+  return smooth(0.3, 1.8, ahead) * (1 - smooth(7, 10, across)) * (1 - smooth(30, 34, ahead))
+}
+
+/**
+ * Buildings don't follow the cutaway instantly: each has its own cut that
+ * glides to the target, so a fast turn sinks them over half a second instead
+ * of snapping. Signs, pods and roof kit shrink away with the same value.
+ */
+interface Cutter { x: number; z: number; cut: number; apply(cut: number): void }
+const CUT_EASE = 0.16 // seconds, time constant
+
+/** Overhead wires are clipped where they cross the cut (no easing: they're thin). */
+function cutWire<T extends Material>(m: T): T {
+  const prev = m.onBeforeCompile.bind(m)
+  const prevKey = m.customProgramCacheKey.bind(m)
+  m.onBeforeCompile = (shader, renderer) => {
+    prev(shader, renderer)
+    shader.uniforms.uFocus = focus
+    shader.uniforms.uView = view
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\n${CUT}`)
+      .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\nif (cutaway(vHzW.xz) > 0.5) discard;`)
+  }
+  m.customProgramCacheKey = () => `${prevKey()}-cutf`
+  return m
+}
+
+/**
+ * Each merged piece's eased cut, one float per piece, read in the vertex
+ * shader by the piece's index. One texture upload a frame while buildings
+ * move, instead of a material per building.
+ */
+const CUTS_W = 256
+const PIECE_CUT = /* glsl */ `
+  attribute float aPiece;
+  attribute vec3 aLot;
+  uniform sampler2D uCuts;
+  float pieceCut() {
+    int i = int(aPiece + 0.5);
+    return texelFetch(uCuts, ivec2(i % ${CUTS_W}, i / ${CUTS_W}), 0).r;
+  }`
+const cuts = { value: null as DataTexture | null }
+
+/** Roof kit and the like: shrinks about its own origin as its building sinks. */
+const SHRINK = /* glsl */ `
+  #include <begin_vertex>
+  transformed = aLot + (transformed - aLot) * max(1.0 - smoothstep(0.15, 0.7, pieceCut()), 1e-4);`
+function shrinking<T extends Material>(m: T, key: string): T {
+  const prev = m.onBeforeCompile.bind(m)
+  m.onBeforeCompile = (shader, renderer) => {
+    prev(shader, renderer)
+    shader.uniforms.uCuts = cuts
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>\n${PIECE_CUT}`)
+      .replace('#include <begin_vertex>', SHRINK)
+  }
+  m.customProgramCacheKey = () => `shrink-${key}`
+  return m
+}
+
 /**
  * Concrete with ribbon windows, lit at night; takes the cutaway. Drawn on
- * merged geometry: the concrete colour comes per vertex, and `aLot` carries
- * each piece's origin for the cutaway.
+ * merged geometry: the concrete colour comes per vertex, the cut per piece.
  */
 function facade(): MeshStandardMaterial {
   const m = new MeshStandardMaterial({ roughness: 0.9, vertexColors: true })
   return hazed(m, 'facade', (shader) => {
-    shader.uniforms.uFocus = focus
+    shader.uniforms.uCuts = cuts
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\nattribute vec3 aLot;\nvarying vec3 vFW;\nvarying vec3 vFN;\n${CUT}`)
+      .replace('#include <common>', `#include <common>\nvarying vec3 vFW;\nvarying vec3 vFN;\n${PIECE_CUT}`)
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
-        transformed.y = mix(transformed.y, min(transformed.y, 0.35), cutaway(aLot.xz));`,
+        // A tower sinks a little deeper than its podium, so its flattened
+        // top hides under the stump instead of fighting it for the same depth.
+        transformed.y = mix(transformed.y, min(transformed.y, aLot.y > 0.01 ? 0.3 : 0.35), pieceCut());`,
       )
       .replace(
         '#include <project_vertex>',
@@ -243,19 +324,67 @@ function blocks(map: DistrictMap, kind: number): [number, number, number, number
 
 export interface Street {
   group: Group
-  /** `wet` is 0 dry to 1 soaked: reflections on the ground. */
-  update(focusX: number, focusZ: number, night: number, wet: number): void
+  /** `wet` is 0 dry to 1 soaked: reflections on the ground. (viewX, viewZ) is
+   * the unit ground direction towards the camera; the cutaway and the wet
+   * streaks follow it. */
+  update(focusX: number, focusZ: number, night: number, wet: number, viewX?: number, viewZ?: number): void
+  /** The wet ground's mirror: the caller renders the street from below into
+   * `uRefl` with `uReflMat` as its projection, hiding `notReflected` meanwhile. */
+  mirror: { uniforms: WetUniforms; notReflected: Object3D[] }
 }
+
+export interface WetUniforms {
+  uRefl: { value: Texture | null }
+  uReflMat: { value: Matrix4 }
+  uWet: { value: number }
+  uTime: { value: number }
+}
+
+/** Puddles, ripples and the mirror image, mixed into the ground before the haze. */
+const WET_GLSL = /* glsl */ `
+  float wHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float wNoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(wHash(i), wHash(i + vec2(1, 0)), f.x), mix(wHash(i + vec2(0, 1)), wHash(i + vec2(1, 1)), f.x), f.y);
+  }`
 
 export function buildStreet(map: DistrictMap): Street {
   const group = new Group()
   const color = new Color()
 
   // Ground: one painted plane over the district, plain asphalt beyond it.
-  const outer = new Mesh(new PlaneGeometry(400, 400).rotateX(-Math.PI / 2), hazed(new MeshStandardMaterial({ color: 0x2b2c2d, roughness: 0.9 })))
+  const wetU: WetUniforms = { uRefl: { value: null }, uReflMat: { value: new Matrix4() }, uWet: { value: 0 }, uTime: { value: 0 } }
+  const wetPatch = (shader: WebGLProgramParametersWithUniforms) => {
+    Object.assign(shader.uniforms, wetU)
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\nuniform sampler2D uRefl;\nuniform mat4 uReflMat;\nuniform float uWet, uTime;\n${WET_GLSL}`)
+      .replace(
+        '#include <fog_fragment>',
+        `if (uWet > 0.01) {
+          vec2 p = vHzW.xz;
+          // Puddles where the ground dips: a soft noise field, more of it the wetter it is.
+          float puddle = smoothstep(0.62 - 0.12 * uWet, 0.72 - 0.12 * uWet, wNoise(p * 0.55) * 0.75 + wNoise(p * 2.1) * 0.25);
+          // Raindrop rings wobble the mirror; damp asphalt blurs it more than a puddle does.
+          vec2 rip = vec2(wNoise(p * 5.0 + uTime * 1.1), wNoise(p * 5.0 - uTime * 0.9)) - 0.5;
+          vec4 rp = uReflMat * vec4(vHzW, 1.0);
+          vec2 ruv = rp.xy / rp.w + rip * mix(0.005, 0.0015, puddle);
+          // Softer the less wet it is: a thin film blurs what a puddle mirrors.
+          float r = mix(0.012, 0.0015, uWet);
+          vec3 mirror = (texture2D(uRefl, ruv).rgb * 2.0
+            + texture2D(uRefl, ruv + vec2(r, 0.0)).rgb + texture2D(uRefl, ruv - vec2(r, 0.0)).rgb
+            + texture2D(uRefl, ruv + vec2(0.0, r)).rgb + texture2D(uRefl, ruv - vec2(0.0, r)).rgb) / 6.0;
+          float k = uWet * uWet * mix(0.05, 0.32, puddle);
+          // Water darkens what it covers and shows the sky's glow in its place.
+          gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - 0.5 * k) + mirror * k;
+        }
+        #include <fog_fragment>`,
+      )
+  }
+  const outer = new Mesh(new PlaneGeometry(400, 400).rotateX(-Math.PI / 2), hazed(new MeshStandardMaterial({ color: 0x2b2c2d, roughness: 0.9 }), 'outer', wetPatch))
   outer.position.set(map.width / 2, -0.01, map.height / 2)
   outer.receiveShadow = true
-  const groundMat = hazed(new MeshStandardMaterial({ map: paintGround(map), roughness: 0.85 }), 'ground')
+  const groundMat = hazed(new MeshStandardMaterial({ map: paintGround(map), roughness: 0.85 }), 'ground', wetPatch)
   const ground = new Mesh(new PlaneGeometry(map.width, map.height).rotateX(-Math.PI / 2), groundMat)
   ground.position.set(map.width / 2 - 0.5, 0, map.height / 2 - 0.5)
   ground.receiveShadow = true
@@ -263,10 +392,23 @@ export function buildStreet(map: DistrictMap): Street {
 
   // Buildings: each block split into lots; each lot a podium and a tower.
   // Everything static is merged per 16-tile chunk: one draw for the concrete,
-  // one for the roof kit, and the chunks still cull off-screen.
+  // one for the roof kit, and the chunks still cull off-screen. Each piece
+  // keeps its own eased cut in the `cuts` texture.
   const facadeMat = facade()
-  const roofMat = hazed(new MeshStandardMaterial({ color: 0x9c998f, roughness: 0.8 }), 'roofkit')
+  const roofMat = shrinking(hazed(new MeshStandardMaterial({ color: 0x9c998f, roughness: 0.8 }), 'roofkit'), 'roofkit')
+  const roofDepth = shrinking(new MeshDepthMaterial({ depthPacking: RGBADepthPacking }), 'roofkit-depth')
   const concrete = CONCRETE.map((hex) => new Color().setHex(hex))
+  const heightAt = (x: number, y: number) => map.heights[y * map.width + x] ?? 1
+  const cutters: Cutter[] = []
+  const cutData: number[] = []
+  let cutsDirty = true
+  /** A new piece with its own cut; returns its index. */
+  const piece = (x: number, z: number) => {
+    const i = cutData.length
+    cutData.push(0)
+    cutters.push({ x, z, cut: 0, apply(cut) { cutData[i] = cut; cutsDirty = true } })
+    return i
+  }
   const chunks = new Map<string, { walls: Merger; roof: Merger }>()
   const chunk = (x: number, z: number) => {
     const k = `${Math.floor(x / 16)}:${Math.floor(z / 16)}`
@@ -275,14 +417,16 @@ export function buildStreet(map: DistrictMap): Street {
     return c
   }
   const wall = (geo: BufferGeometry, tint: Color, x: number, z: number, y = 0) => {
-    chunk(x, z).walls.add(geo, x, y, z, 0, tint)
+    chunk(x, z).walls.add(geo, x, y, z, 0, tint, piece(x, z))
     geo.dispose()
   }
   const kit = (geo: BufferGeometry, x: number, z: number, y: number) => {
-    chunk(x, z).roof.add(geo, x, y, z)
+    chunk(x, z).roof.add(geo, x, y, z, 0, undefined, piece(x, z))
     geo.dispose()
   }
-  const heightAt = (x: number, y: number) => map.heights[y * map.width + x] ?? 1
+  // Every lot's shape, by tile, so signs can find the wall they hang on.
+  interface Lot { cx: number; cz: number; w: number; d: number; podium: number; tower: { w: number; d: number; corner: number; top: number } | null }
+  const lotAt = new Map<number, Lot>()
   for (const [bx0, by0, bx1, by1] of blocks(map, Tile.Building)) {
     const long = bx1 - bx0 >= by1 - by0
     const len = long ? bx1 - bx0 + 1 : by1 - by0 + 1
@@ -300,11 +444,14 @@ export function buildStreet(map: DistrictMap): Street {
       const tint = concrete[(h >>> 5) % concrete.length]!
       const corner = [0.08, 0.25, 0.5][(h >>> 7) % 3]!
       const podium = Math.min(storeys, 2) * STOREY
+      const lot: Lot = { cx, cz, w: w - 0.06, d: d - 0.06, podium, tower: null }
+      for (let y = ly0; y <= ly1; y++) for (let x = lx0; x <= lx1; x++) lotAt.set(y * map.width + x, lot)
       wall(slab(w - 0.06, d - 0.06, podium, corner * 0.5, 0.03), tint, cx, cz)
       if (storeys > 2 && w > 1.5 && d > 1.5) {
         const inset = 0.3 + ((h >>> 9) % 3) * 0.12
         const tw = Math.max(1, w - inset * 2), td = Math.max(1, d - inset * 2)
         const top = storeys * STOREY
+        lot.tower = { w: tw, d: td, corner, top }
         wall(slab(tw, td, top - podium, corner, 0.04, 6), tint, cx, cz, podium)
         // A setback crown on the tallest.
         const crown = storeys > 7
@@ -341,68 +488,112 @@ export function buildStreet(map: DistrictMap): Street {
   }
   const pods = inst(roundedBox(0.72, 0.56, 0.56, 0.09), podMat, podAt.length)
   const ports = inst(new CylinderGeometry(0.15, 0.15, 0.03, 20).rotateX(Math.PI / 2), portMat, portAt.length)
+  // Pods and portholes shrink away with the cut, one instance at a time.
   for (const [m, at] of [[pods, podAt], [ports, portAt]] as const)
     at.forEach(([x, y, z, ry], i) => {
-      tmp.position.set(x, y, z)
-      tmp.rotation.set(0, (ry * Math.PI) / 2, 0)
-      tmp.updateMatrix()
-      m.setMatrixAt(i, tmp.matrix)
+      const place = (k: number) => {
+        tmp.position.set(x, y, z)
+        tmp.rotation.set(0, (ry * Math.PI) / 2, 0)
+        tmp.scale.setScalar(Math.max(k, 1e-4))
+        tmp.updateMatrix()
+        m.setMatrixAt(i, tmp.matrix)
+        m.instanceMatrix.needsUpdate = true
+        tmp.rotation.set(0, 0, 0)
+        tmp.scale.setScalar(1)
+      }
+      place(1)
+      cutters.push({ x, z, cut: 0, apply(cut) { place(1 - smooth(0.15, 0.7, cut)) } })
     })
-  tmp.rotation.set(0, 0, 0)
   pods.castShadow = pods.receiveShadow = true
   ports.receiveShadow = true
   group.add(pods, ports)
+
+  // The cut texture, sized for every piece.
+  const cutRows = Math.max(1, Math.ceil(cutData.length / CUTS_W))
+  const cutTex = new DataTexture(new Float32Array(CUTS_W * cutRows), CUTS_W, cutRows, RedFormat, FloatType)
+  cuts.value = cutTex
   for (const { walls, roof } of chunks.values()) {
     const w = new Mesh(walls.build(), facadeMat)
     w.castShadow = w.receiveShadow = true
     group.add(w)
     if (roof.empty) continue
     const r = new Mesh(roof.build(), roofMat)
+    r.customDepthMaterial = roofDepth
     r.castShadow = r.receiveShadow = true
     group.add(r)
+  }
+
+  /**
+   * Where a blade sign hangs: on the tower's face if the sign fits within it,
+   * else on the podium, low enough to sit below its roof. Returns the centre
+   * of the sign (its inner edge against the wall) and its height.
+   */
+  const mount = (p: Prop): [number, number, number] => {
+    const [dx, dz] = ([[0, 1], [-1, 0], [0, -1], [1, 0]] as const)[p.rot]! // towards the building
+    const lot = lotAt.get((p.y + dz) * map.width + (p.x + dx))
+    const want = Math.min(p.z * STOREY * 1.5, 3 * STOREY) + 1.0
+    if (!lot) return [p.x + dx * 0.62, want, p.y + dz * 0.62]
+    // Distance from the lot's centre to a face, and the sign's place along it.
+    const faceOf = (w: number, d: number) => (dx !== 0 ? w : d) / 2
+    const along = dx !== 0 ? p.y - lot.cz : p.x - lot.cx
+    const t = lot.tower
+    let face: number, y: number
+    if (t && want - 0.55 >= lot.podium + 0.05 && want + 0.55 <= t.top - 0.1 && Math.abs(along) <= (dx !== 0 ? t.d : t.w) / 2 - t.corner - 0.2) {
+      face = faceOf(t.w, t.d)
+      y = want
+    } else {
+      face = faceOf(lot.w, lot.d)
+      y = Math.min(want, lot.podium - 0.6)
+    }
+    // The lot centre minus the face distance, towards the pavement, plus half the sign's depth.
+    const out = face + 0.16
+    return dx !== 0 ? [lot.cx - dx * out, y, p.y] : [p.x, y, lot.cz - dz * out]
   }
 
   // Blade signs sticking out from the facade.
   const neon = map.props.filter((p) => p.kind === PropKind.Neon)
   const signMat = hazed(new MeshBasicMaterial({ map: signTexture() }), 'sign')
-  const glowMat = new MeshBasicMaterial({ map: radial('rgba(255,255,255,0.9)', 'rgba(255,255,255,0)'), transparent: true, blending: AdditiveBlending, depthWrite: false })
+  const glowMat = (new MeshBasicMaterial({ map: radial('rgba(255,255,255,0.9)', 'rgba(255,255,255,0)'), transparent: true, blending: AdditiveBlending, depthWrite: false }))
   const signs = inst(roundedBox(0.07, 1.1, 0.32, 0.025), signMat, neon.length)
   const glows = inst(new PlaneGeometry(1.4, 2.2), glowMat, neon.length)
-  const faces = [[0, 0.5], [-0.5, 0], [0, -0.5], [0.5, 0]] as const
+  const reflect: [number, number, number, number, number][] = [] // x, z, height, colour, width
+  // Per-streak scale; the lit signs' streaks go with their building.
+  const streakK: number[] = []
   neon.forEach((p: Prop, i) => {
-    const [ox, oz] = faces[p.rot]!
-    tmp.position.set(p.x + ox * 0.62, Math.min(p.z * STOREY * 1.5, 3 * STOREY) + 1.0, p.y + oz * 0.62)
-    tmp.rotation.set(0, p.rot % 2 === 1 ? Math.PI / 2 : 0, 0)
-    tmp.updateMatrix()
-    signs.setMatrixAt(i, tmp.matrix)
-    tmp.rotation.set(-Math.PI / 6, Math.PI / 4, 0, 'YXZ')
-    tmp.updateMatrix()
-    glows.setMatrixAt(i, tmp.matrix)
-    tmp.rotation.set(0, 0, 0, 'XYZ')
-    const r = (hashString(`sign:${p.x}:${p.y}`) >>> 0) % 100
-    const hex = r < 6 ? SIGN_LOUD[r % 2]! : SIGN_WARM[p.hue % SIGN_WARM.length]!
-    signs.setColorAt(i, color.setHex(hex))
-    glows.setColorAt(i, color.setHex(hex))
+    const [sx, sy, sz] = mount(p)
+    const hex = signHex(p)
+    const streak = hex === null ? -1 : reflect.push([sx, sz, sy, hex, 0.3]) - 1
+    const signRot = p.rot % 2 === 1 ? Math.PI / 2 : 0
+    const place = (k: number) => {
+      tmp.position.set(sx, sy, sz)
+      tmp.scale.setScalar(Math.max(k, 1e-4))
+      tmp.rotation.set(0, signRot, 0)
+      tmp.updateMatrix()
+      signs.setMatrixAt(i, tmp.matrix)
+      tmp.rotation.set(-Math.PI / 6, Math.PI / 4, 0, 'YXZ')
+      tmp.updateMatrix()
+      glows.setMatrixAt(i, tmp.matrix)
+      tmp.rotation.set(0, 0, 0, 'XYZ')
+      tmp.scale.setScalar(1)
+      signs.instanceMatrix.needsUpdate = glows.instanceMatrix.needsUpdate = true
+    }
+    place(1)
+    // Keyed to the building face the sign hangs off, not the sign itself.
+    cutters.push({ x: p.x, z: p.y, cut: 0, apply(cut) { place(1 - smooth(0.15, 0.7, cut)); if (streak >= 0) streakK[streak] = 1 - smooth(0.15, 0.7, cut) } })
+    signs.setColorAt(i, color.setHex(hex ?? SIGN_DEAD))
+    glows.setColorAt(i, color.setHex(hex ?? 0)) // additive: black glow is none
   })
   group.add(signs, glows)
-  const reflect: [number, number, number, number, number][] = [] // x, z, height, colour, width
-  neon.forEach((p) => {
-    const [ox, oz] = faces[p.rot]!
-    const r = (hashString(`sign:${p.x}:${p.y}`) >>> 0) % 100
-    const hex = r < 6 ? SIGN_LOUD[r % 2]! : SIGN_WARM[p.hue % SIGN_WARM.length]!
-    reflect.push([p.x + ox * 0.62, p.y + oz * 0.62, Math.min(p.z * STOREY * 1.5, 3 * STOREY) + 1.0, hex, 0.3])
-  })
 
   // Sodium lamps with a pool of light on the ground.
   const lamps = map.props.filter((p) => p.kind === PropKind.Lamp)
   for (let y = 0; y < map.height; y++)
     for (let x = 0; x < map.width; x++)
-      if (map.tile(x, y) === Tile.Pavement && (x * 7 + y * 13) % 11 === 0 && map.walkable(x, y))
+      if (map.tile(x, y) === Tile.Pavement && (x * 7 + y * 13) % 23 === 0 && map.walkable(x, y))
         lamps.push({ x, y, kind: PropKind.Lamp, rot: 0, hue: 0, z: 0 })
   const posts = inst(new CylinderGeometry(0.022, 0.032, 2.4, 10).translate(0, 1.2, 0), hazed(new MeshStandardMaterial({ color: 0x3b3a38, roughness: 0.5, metalness: 0.3 }), 'post'), lamps.length)
-  const heads = inst(roundedBox(0.36, 0.05, 0.13, 0.02), hazed(new MeshBasicMaterial({ color: 0xffb35c }), 'lamphead'), lamps.length)
-  const poolMat = new MeshBasicMaterial({ map: radial('rgba(255,170,80,0.5)', 'rgba(255,170,80,0)'), transparent: true, depthWrite: false, blending: AdditiveBlending })
-  const pools = inst(new PlaneGeometry(3.4, 3.4).rotateX(-Math.PI / 2), poolMat, lamps.length)
+  const headMat = hazed(new MeshBasicMaterial({ color: 0xffb35c }), 'lamphead')
+  const heads = inst(roundedBox(0.36, 0.05, 0.13, 0.02), headMat, lamps.length)
   lamps.forEach((p, i) => {
     tmp.position.set(p.x + 0.35, 0, p.y + 0.35)
     tmp.updateMatrix()
@@ -410,12 +601,43 @@ export function buildStreet(map: DistrictMap): Street {
     tmp.position.set(p.x + 0.25, 2.4, p.y + 0.35)
     tmp.updateMatrix()
     heads.setMatrixAt(i, tmp.matrix)
-    tmp.position.set(p.x + 0.25, 0.01, p.y + 0.35)
-    tmp.updateMatrix()
-    pools.setMatrixAt(i, tmp.matrix)
   })
   posts.castShadow = true
-  group.add(posts, heads, pools)
+  group.add(posts, heads)
+
+  // Real light from the lamps: a fixed pool of spotlights (a fixed count, so
+  // shaders never recompile) moved onto the lamps nearest the focus. The
+  // nearest few cast shadows. Each fades out towards the edge of the pool's
+  // reach, so a lamp handing its light to another doesn't pop.
+  const LIGHTS = 12, SHADOWED = 4, REACH = 13
+  const lampAt = lamps.map((p) => new Vector3(p.x + 0.25, 2.33, p.y + 0.35))
+  const pool = Array.from({ length: LIGHTS }, (_, i) => {
+    const l = new SpotLight(0xff9a45, 0, 9, Math.PI / 2.6, 0.75, 2)
+    if (i < SHADOWED) {
+      l.castShadow = true
+      l.shadow.mapSize.set(512, 512)
+      l.shadow.bias = -0.0008
+      l.shadow.normalBias = 0.02
+      l.shadow.camera.near = 0.2
+    }
+    group.add(l, l.target)
+    return l
+  })
+  const order = lampAt.map((_, i) => i)
+  const placeLights = (fx: number, fz: number, night: number) => {
+    const d = (i: number) => Math.hypot(lampAt[i]!.x - fx, lampAt[i]!.z - fz)
+    order.sort((a, b) => d(a) - d(b))
+    pool.forEach((l, k) => {
+      const i = order[k]
+      if (i === undefined) { l.intensity = 0; l.visible = night > 0.05; return }
+      l.position.copy(lampAt[i]!)
+      l.target.position.set(lampAt[i]!.x, 0, lampAt[i]!.z)
+      l.intensity = 30 * night * (1 - Math.min(1, Math.max(0, (d(i) - REACH + 3) / 3)))
+      // Visible all night or not at all: three builds shaders for the number
+      // of visible lights, so switching them one by one recompiles everything.
+      l.visible = night > 0.05
+    })
+  }
   for (const p of lamps) reflect.push([p.x + 0.25, p.y + 0.35, 2.4, 0xffb35c, 0.34])
 
   // Vending machines, the one bright cheap thing on every corner.
@@ -471,19 +693,25 @@ export function buildStreet(map: DistrictMap): Street {
     g.fillRect(0, 0, 32, 128)
     return new CanvasTexture(c)
   })()
-  const streakMat = new MeshBasicMaterial({ map: streakTex, transparent: true, depthWrite: false, blending: AdditiveBlending })
+  const streakMat = (new MeshBasicMaterial({ map: streakTex, transparent: true, depthWrite: false, blending: AdditiveBlending }))
   const streaks = inst(new PlaneGeometry(1, 1).rotateX(-Math.PI / 2), streakMat, reflect.length)
-  reflect.forEach(([x, z, h, hex, w], i) => {
-    const len = h * 0.9
-    tmp.position.set(x + len * 0.3536, 0.015, z + len * 0.3536)
-    tmp.rotation.set(0, Math.PI / 4, 0)
-    tmp.scale.set(w, 1, len)
-    tmp.updateMatrix()
-    streaks.setMatrixAt(i, tmp.matrix)
-    streaks.setColorAt(i, color.setHex(hex))
-  })
-  tmp.rotation.set(0, 0, 0)
-  tmp.scale.set(1, 1, 1)
+  // Streaks point at the camera, so they are laid out again when it turns.
+  const layStreaks = (vx: number, vz: number) => {
+    reflect.forEach(([x, z, hh, , w], i) => {
+      const h = hh * (streakK[i] ?? 1)
+      const len = Math.max(h * 0.9, 1e-4)
+      tmp.position.set(x + len * 0.5 * vx, 0.015, z + len * 0.5 * vz)
+      tmp.rotation.set(0, Math.atan2(vx, vz), 0)
+      tmp.scale.set(w, 1, len)
+      tmp.updateMatrix()
+      streaks.setMatrixAt(i, tmp.matrix)
+    })
+    streaks.instanceMatrix.needsUpdate = true
+    tmp.rotation.set(0, 0, 0)
+    tmp.scale.set(1, 1, 1)
+  }
+  reflect.forEach(([, , , hex], i) => streaks.setColorAt(i, color.setHex(hex)))
+  layStreaks(view.value.x, view.value.y)
   streaks.renderOrder = 2
   group.add(streaks)
 
@@ -522,21 +750,55 @@ export function buildStreet(map: DistrictMap): Street {
     }
   const wireGeo = new BufferGeometry()
   wireGeo.setAttribute('position', new BufferAttribute(new Float32Array(pts), 3))
-  group.add(new LineSegments(wireGeo, hazed(new LineBasicMaterial({ color: 0x1c1b1a }), 'wire')))
+  group.add(new LineSegments(wireGeo, cutWire(hazed(new LineBasicMaterial({ color: 0x1c1b1a }), 'wire'))))
 
-  // Nothing here moves: skip the per-frame matrix work.
-  group.traverse((o) => { o.updateMatrix(); o.matrixAutoUpdate = false })
+  let lastT = 0
+  let lastV = [0, 0]
+  // Nothing here moves but the lights: skip the per-frame matrix work.
+  group.traverse((o) => {
+    if ((o as { isLight?: boolean }).isLight || o.parent !== group || o.children.length) return
+    if (!(o as { isMesh?: boolean }).isMesh && !(o as { isLine?: boolean }).isLine) return
+    o.updateMatrix()
+    o.matrixAutoUpdate = false
+  })
 
   return {
     group,
-    update(fx, fz, night, wet) {
+    mirror: { uniforms: wetU, notReflected: [ground, outer, streaks] },
+    update(fx, fz, night, wet, vx = Math.SQRT1_2, vz = Math.SQRT1_2) {
       focus.value.set(fx, fz)
+      view.value.set(vx, vz)
+      const now = performance.now() / 1000
+      const dt = Math.min(0.1, now - (lastT || now))
+      lastT = now
+      // The first frame lands where it should be; after that, glide.
+      const ease = dt > 0 ? 1 - Math.exp(-dt / CUT_EASE) : 1
+      let moved = false
+      for (const c of cutters) {
+        const t = cutAt(c.x, c.z)
+        if (Math.abs(t - c.cut) < 1e-3 && c.cut === t) continue
+        c.cut = Math.abs(t - c.cut) < 1e-3 ? t : c.cut + (t - c.cut) * ease
+        c.apply(c.cut)
+        moved = true
+      }
+      if (moved || vx !== lastV[0] || vz !== lastV[1]) { layStreaks(vx, vz); lastV = [vx, vz] }
+      if (cutsDirty) {
+        ;(cutTex.image.data as Float32Array).set(cutData)
+        cutTex.needsUpdate = true
+        cutsDirty = false
+      }
       // Signs run brighter than white at night so the bloom picks them up.
       signMat.color.setScalar(0.8 + 0.9 * night)
       glowMat.opacity = 0.12 * night
-      poolMat.opacity = night
+      placeLights(fx, fz, night)
+      // Heads burn brighter than white at night so the bloom takes them.
+      headMat.color.setHex(0xffb35c).multiplyScalar(1 + 1.4 * night)
       haze.uNight.value = night
-      streakMat.opacity = wet * (0.12 + night * 0.6)
+      // The mirror carries most of the reflection now; streaks add the smear
+      // a light gets on rough wet asphalt.
+      streakMat.opacity = wet * (0.06 + night * 0.3)
+      wetU.uWet.value = wet
+      wetU.uTime.value = now
       groundMat.color.setScalar(1 - wet * 0.22)
       groundMat.roughness = 0.85 - wet * 0.4
     },

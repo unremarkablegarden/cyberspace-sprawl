@@ -4,8 +4,8 @@
 // Hour and weather default to the real Japan clock and today's seeded weather.
 
 import {
-  Color, DirectionalLight, HemisphereLight, NoToneMapping, OrthographicCamera, PCFShadowMap, Scene, SRGBColorSpace,
-  Vector3, WebGLRenderer,
+  Color, DirectionalLight, HalfFloatType, HemisphereLight, Matrix4, NoToneMapping, OrthographicCamera, PCFShadowMap, Scene,
+  SRGBColorSpace, Vector3, WebGLRenderer, WebGLRenderTarget,
 } from 'three'
 import { generateDistrict } from '@sprawl/shared'
 import { districtById, START_DISTRICT } from '@sprawl/content'
@@ -99,23 +99,37 @@ for (const [name, dx, dz, spec] of people) {
 }
 
 
-// Isometric camera, 30° down from the south-east, shared by street and
-// capsule. Zoom is the world height of the screen: wheel, pinch, or + and -.
+// Isometric camera, 30° down, shared by street and capsule. Zoom is the world
+// height of the screen: wheel, pinch, or + and -. On the street it also turns:
+// drag, a sideways two-finger swipe, or hold Q / E. The capsule stays on the south-east,
+// where its cut-open side faces.
 const ZOOM = { street: { min: 5, max: 26, at: Number(q.get('zoom') ?? 12) }, capsule: { min: 2.2, max: 7, at: 3.6 } }
 let zoom = ZOOM.street.at
 let zoomTarget = zoom
 const iso = new OrthographicCamera(-1, 1, 1, -1, 0.1, 400)
 const elev = (30 * Math.PI) / 180
-const viewDir = new Vector3(Math.cos(elev) * Math.SQRT1_2, Math.sin(elev), Math.cos(elev) * Math.SQRT1_2)
-const aim = (at: Vector3) => { iso.position.copy(viewDir).multiplyScalar(80).add(at); iso.lookAt(at) }
+const SOUTH_EAST = Math.PI / 4
+let yaw = SOUTH_EAST
+let yawTarget = SOUTH_EAST
+const viewDir = new Vector3()
+const aimAt = focus.clone()
+const aim = (at: Vector3) => {
+  aimAt.copy(at)
+  viewDir.set(Math.cos(elev) * Math.sin(yaw), Math.sin(elev), Math.cos(elev) * Math.cos(yaw))
+  iso.position.copy(viewDir).multiplyScalar(80).add(at)
+  iso.lookAt(at)
+  // Name tags project through this camera before the frame renders.
+  iso.updateMatrixWorld()
+  haze.uHzView.value.copy(viewDir)
+}
 aim(focus)
 haze.uHzFocus.value.set(focus.x, focus.z)
-haze.uHzView.value.copy(viewDir)
 const frameIso = () => {
   const aspect = innerWidth / innerHeight
   Object.assign(iso, { left: (-zoom * aspect) / 2, right: (zoom * aspect) / 2, top: zoom / 2, bottom: -zoom / 2 })
   iso.updateProjectionMatrix()
 }
+frameIso()
 // The sun's shadow covers what the camera sees, so close up the same map
 // spends its texels on less ground and shadows come out sharper.
 let shadowSpan = 0
@@ -128,18 +142,51 @@ const fitShadow = () => {
   sun.shadow.camera.updateProjectionMatrix()
   shadowsDirty = true
 }
-frameIso()
 
 // People walking, traffic, steam.
 const life = buildLife(map, focus, blob, crowd, iso.quaternion)
 streetScene.add(life.group, crowd.build())
+
+// ── The wet ground's mirror ─────────────────────────────────────────────
+// When it's wet the street is drawn a second time, at half size, from a
+// camera mirrored under the ground; the ground shader samples it through
+// uReflMat. Shadow maps are reused from the main pass.
+
+const reflRT = new WebGLRenderTarget(1, 1, { type: HalfFloatType })
+const setReflSize = () => reflRT.setSize(Math.ceil(innerWidth * gl.getPixelRatio() / 2), Math.ceil(innerHeight * gl.getPixelRatio() / 2))
+setReflSize()
+street.mirror.uniforms.uRefl.value = reflRT.texture
+const mirrorCam = new OrthographicCamera()
+const BIAS = new Matrix4().set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1)
+const up = new Vector3()
+function renderMirror(): void {
+  mirrorCam.copy(iso)
+  mirrorCam.position.set(iso.position.x, -iso.position.y, iso.position.z)
+  up.set(0, 1, 0).applyQuaternion(iso.quaternion)
+  mirrorCam.up.set(up.x, -up.y, up.z)
+  mirrorCam.lookAt(aimAt.x, 0, aimAt.z)
+  mirrorCam.updateMatrixWorld()
+  street.mirror.uniforms.uReflMat.value.multiplyMatrices(BIAS, mirrorCam.projectionMatrix).multiply(mirrorCam.matrixWorldInverse)
+  const hidden = [...street.mirror.notReflected, rain.mesh].filter((o) => o.visible)
+  for (const o of hidden) o.visible = false
+  const auto = gl.shadowMap.autoUpdate
+  gl.shadowMap.autoUpdate = false
+  const was = gl.getRenderTarget()
+  gl.setRenderTarget(reflRT)
+  gl.clear()
+  gl.render(streetScene, mirrorCam)
+  gl.setRenderTarget(was)
+  gl.shadowMap.autoUpdate = auto
+  for (const o of hidden) o.visible = true
+}
 
 // ── Applying the controls ────────────────────────────────────────────────
 
 let scene: Scene = streetScene
 let night = 0
 let wet = 0
-const WET: Record<WeatherKind, number> = { drizzle: 1, fog: 0.45, overcast: 0.2, clear: 0.05 }
+// Only rain wets the street; fog leaves a thin, soft sheen.
+const WET: Record<WeatherKind, number> = { drizzle: 1, fog: 0.3, overcast: 0, clear: 0 }
 let shown = 'street'
 let capsule: Capsule | null = null
 
@@ -155,6 +202,7 @@ function apply(): void {
     frameIso()
   }
   if (state.scene === 'capsule') {
+    yaw = yawTarget = SOUTH_EAST
     capsule ??= buildCapsule(blob)
     capsule.update(sky)
     scene = capsule.scene
@@ -261,7 +309,7 @@ bar.append(
   timeGroup,
   segment('Weather', 'weather', WEATHERS.map((w) => [w[0]!.toUpperCase() + w.slice(1), w])),
   segment('Seams', 'seams', [['Off', false], ['On', true]]),
-  el('span', 'lab-hint', 'Scroll, pinch or +/− to zoom'),
+  el('span', 'lab-hint', 'Drag, swipe sideways or hold Q/E to turn · scroll, pinch or +/− to zoom'),
 )
 document.body.append(bar)
 
@@ -279,18 +327,31 @@ const zoomBy = (k: number) => {
   const z = ZOOM[state.scene as 'street']
   zoomTarget = Math.min(z.max, Math.max(z.min, zoomTarget * k))
 }
-gl.domElement.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(Math.exp(e.deltaY * 0.0015)) }, { passive: false })
+gl.domElement.addEventListener('wheel', (e) => {
+  e.preventDefault()
+  // Trackpads: vertical swipe or pinch zooms, sideways swipe turns.
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) { if (state.scene === 'street') yawTarget = yaw = yaw + e.deltaX * 0.004 }
+  else zoomBy(Math.exp(e.deltaY * 0.0015))
+}, { passive: false })
 addEventListener('keydown', (e) => {
   if (e.key === '+' || e.key === '=') zoomBy(1 / 1.25)
   if (e.key === '-' || e.key === '_') zoomBy(1.25)
+  turning[e.key.toLowerCase()] = true
 })
+// Q and E turn the view while held.
+const turning: Record<string, boolean> = {}
+addEventListener('keyup', (e) => { turning[e.key.toLowerCase()] = false })
+addEventListener('blur', () => { turning.q = turning.e = false })
 const touches = new Map<number, [number, number]>()
 let pinch = 0
 const spread = () => { const [a, b] = [...touches.values()]; return a && b ? Math.hypot(a[0] - b[0], a[1] - b[1]) : 0 }
 gl.domElement.addEventListener('pointerdown', (e) => { touches.set(e.pointerId, [e.clientX, e.clientY]); pinch = spread() })
 addEventListener('pointermove', (e) => {
   if (!touches.has(e.pointerId)) return
+  const [px] = touches.get(e.pointerId)!
   touches.set(e.pointerId, [e.clientX, e.clientY])
+  // One pointer drags the view round; two pinch.
+  if (touches.size === 1 && state.scene === 'street') yawTarget = yaw = yaw - (e.clientX - px) * 0.008
   const d = spread()
   if (pinch && d) zoomBy(pinch / d)
   pinch = d
@@ -302,6 +363,7 @@ const resize = () => {
   gl.setPixelRatio(pr)
   gl.setSize(innerWidth, innerHeight)
   post.setSize(innerWidth, innerHeight)
+  setReflSize()
   frameIso()
 }
 addEventListener('resize', resize)
@@ -339,6 +401,7 @@ const statMs: number[] = []
 apply()
 const v = new Vector3()
 let frames = 0
+let aimedYaw = yaw
 let last = 0
 let lastAlpha = ''
 gl.setAnimationLoop((ms) => {
@@ -349,8 +412,13 @@ gl.setAnimationLoop((ms) => {
   gl.info.reset()
   if (Math.abs(zoom - zoomTarget) > 0.001) { zoom += (zoomTarget - zoom) * 0.18; frameIso() }
   if (state.scene === 'street') fitShadow()
+  const spin = state.scene === 'street' ? Number(!!turning.e) - Number(!!turning.q) : 0
+  if (spin) yawTarget = yaw = yaw + spin * 1.6 * dt
+  if (Math.abs(yaw - yawTarget) > 1e-4) yaw += (yawTarget - yaw) * 0.18
+  if (yaw !== aimedYaw) { aimedYaw = yaw; aim(aimAt) }
   if (state.scene === 'street') {
-    street.update(focus.x, focus.z, night, wet)
+    const flat = Math.hypot(viewDir.x, viewDir.z)
+    street.update(focus.x, focus.z, night, wet, viewDir.x / flat, viewDir.z / flat)
     life.update(ms / 1000, dt, night)
     cast.forEach((r, i) => animateWalk(r, i * 1.7, 0, ms / 1000))
     if (rain.mesh.visible) rain.update(ms / 1000, focus.x, focus.z)
@@ -368,8 +436,11 @@ gl.setAnimationLoop((ms) => {
     if (alpha !== lastAlpha) for (const [tag] of tags) tag.style.opacity = alpha
     lastAlpha = alpha
   }
+  // Whichever pass renders first redraws the shadow maps if they are due.
   gl.shadowMap.needsUpdate = shadowsDirty
   shadowsDirty = false
+  // The mirror uses last frame's shadow maps, so it runs after one main pass.
+  if (state.scene === 'street' && wet > 0.05 && frames > 0) renderMirror()
   post.render(scene, iso, ms / 1000)
   if (stats && frame > 0) {
     statMs.push(frame)

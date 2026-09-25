@@ -59,19 +59,21 @@ export function roundedBox(w: number, h: number, d: number, r: number): BufferGe
 /**
  * Many small static meshes as one geometry, so they cost one draw call. Each
  * piece is placed in world space, painted one colour, and remembers its own
- * origin in `aLot` for shaders that used to read it from the model matrix.
+ * origin in `aLot` and its index in `aPiece`, for shaders that move pieces
+ * one by one (the cutaway).
  */
 export class Merger {
   #pos: number[] = []
   #nor: number[] = []
   #col: number[] = []
   #lot: number[] = []
+  #piece: number[] = []
 
   get empty(): boolean {
     return this.#pos.length === 0
   }
 
-  add(geo: BufferGeometry, x: number, y: number, z: number, rotY = 0, color: Color = WHITE): void {
+  add(geo: BufferGeometry, x: number, y: number, z: number, rotY = 0, color: Color = WHITE, piece = 0): void {
     const g = geo.index ? geo.toNonIndexed() : geo
     const p = g.getAttribute('position'), n = g.getAttribute('normal')
     const c = Math.cos(rotY), s = Math.sin(rotY)
@@ -81,6 +83,7 @@ export class Merger {
       this.#nor.push(nx * c + nz * s, n.getY(i), -nx * s + nz * c)
       this.#col.push(color.r, color.g, color.b)
       this.#lot.push(x, y, z)
+      this.#piece.push(piece)
     }
     if (g !== geo) g.dispose()
   }
@@ -91,6 +94,7 @@ export class Merger {
     g.setAttribute('normal', new Float32BufferAttribute(this.#nor, 3))
     g.setAttribute('color', new Float32BufferAttribute(this.#col, 3))
     g.setAttribute('aLot', new Float32BufferAttribute(this.#lot, 3))
+    g.setAttribute('aPiece', new Float32BufferAttribute(this.#piece, 1))
     g.computeBoundingSphere()
     g.computeBoundingBox()
     return g
