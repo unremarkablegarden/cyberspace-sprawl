@@ -305,15 +305,15 @@ export function buildStreet(map: DistrictMap): Street {
         const inset = 0.3 + ((h >>> 9) % 3) * 0.12
         const tw = Math.max(1, w - inset * 2), td = Math.max(1, d - inset * 2)
         const top = storeys * STOREY
-        wall(slab(tw, td, top - podium, corner, 0.04, 10), tint, cx, cz, podium)
+        wall(slab(tw, td, top - podium, corner, 0.04, 6), tint, cx, cz, podium)
         // A setback crown on the tallest.
         const crown = storeys > 7
-        if (crown) wall(slab(tw * 0.6, td * 0.6, 1.4 * STOREY, corner, 0.04, 10), tint, cx, cz, top)
+        if (crown) wall(slab(tw * 0.6, td * 0.6, 1.4 * STOREY, corner, 0.04, 6), tint, cx, cz, top)
         // Roof kit: a plant box and sometimes a water tank.
         const roofY = top + (crown ? 1.4 * STOREY : 0)
         const kw = crown ? tw * 0.6 : tw, kd = crown ? td * 0.6 : td
         kit(roundedBox(0.35, 0.22, 0.25, 0.03), cx - kw * 0.2, cz + kd * 0.15, roofY + 0.11)
-        if ((h >>> 11) % 2) kit(new CylinderGeometry(0.16, 0.16, 0.34, 16), cx + kw * 0.2, cz - kd * 0.15, roofY + 0.17)
+        if ((h >>> 11) % 2) kit(new CylinderGeometry(0.16, 0.16, 0.34, 10), cx + kw * 0.2, cz - kd * 0.15, roofY + 0.17)
       }
     }
   }

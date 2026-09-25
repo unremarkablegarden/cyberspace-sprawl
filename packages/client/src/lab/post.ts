@@ -17,7 +17,7 @@ function target(samples = 0): WebGLRenderTarget {
 export class Post {
   exposure = 1.0
   bloom = 0.6
-  #scene = target(4)
+  #scene = target(2)
   #soft = target()
   #blurA = [target(), target()]
   #blurB = [target(), target()]

@@ -50,8 +50,8 @@ const GEO = {
   arm: () => new CylinderGeometry(0.022, 0.018, 0.34, 10).translate(0, -0.17, 0),
   hand: () => new SphereGeometry(0.018, 8, 6),
   neck: () => new CylinderGeometry(0.018, 0.02, 0.04, 10).translate(0, -0.02, 0),
-  head: () => new SphereGeometry(0.05, 14, 12),
-  cap: () => new SphereGeometry(0.053, 14, 8, 0, Math.PI * 2, 0, Math.PI * 0.55),
+  head: () => new SphereGeometry(0.05, 10, 8),
+  cap: () => new SphereGeometry(0.053, 10, 6, 0, Math.PI * 2, 0, Math.PI * 0.55),
   fall: () => new CylinderGeometry(0.045, 0.04, 0.12, 10).translate(0, -0.06, 0),
   blob: () => new PlaneGeometry(0.5, 0.5).rotateX(-Math.PI / 2),
 }

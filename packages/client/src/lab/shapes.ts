@@ -34,7 +34,7 @@ export function roundedRect(w: number, d: number, r: number): Shape {
  * A footprint of w × d extruded to height h, standing on y = 0. `corner` rounds
  * the plan, `bevel` softens the top and bottom edges.
  */
-export function slab(w: number, d: number, h: number, corner: number, bevel: number, segments = 6): BufferGeometry {
+export function slab(w: number, d: number, h: number, corner: number, bevel: number, segments = 5): BufferGeometry {
   bevel = Math.max(0, Math.min(bevel, h / 2 - 0.0001, w / 2 - 0.004, d / 2 - 0.004))
   const shape = roundedRect(w - 2 * bevel, d - 2 * bevel, Math.max(0.0001, corner - bevel))
   const g = new ExtrudeGeometry(shape, {
@@ -42,7 +42,7 @@ export function slab(w: number, d: number, h: number, corner: number, bevel: num
     bevelEnabled: bevel > 0.0005,
     bevelThickness: bevel,
     bevelSize: bevel,
-    bevelSegments: 3,
+    bevelSegments: 2,
     curveSegments: segments,
   })
   // Extrusion runs along +Z; stand it up so it runs along +Y from the ground.

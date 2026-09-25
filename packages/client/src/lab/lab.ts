@@ -98,9 +98,6 @@ for (const [name, dx, dz, spec] of people) {
   tags.push([tag, new Vector3(f.position.x, f.position.y + spec.height * 1.06, f.position.z), ''])
 }
 
-// People walking, traffic, steam.
-const life = buildLife(map, focus, blob, crowd)
-streetScene.add(life.group, crowd.build())
 
 // Isometric camera, 30° down from the south-east, shared by street and
 // capsule. Zoom is the world height of the screen: wheel, pinch, or + and -.
@@ -119,7 +116,23 @@ const frameIso = () => {
   Object.assign(iso, { left: (-zoom * aspect) / 2, right: (zoom * aspect) / 2, top: zoom / 2, bottom: -zoom / 2 })
   iso.updateProjectionMatrix()
 }
+// The sun's shadow covers what the camera sees, so close up the same map
+// spends its texels on less ground and shadows come out sharper.
+let shadowSpan = 0
+const fitShadow = () => {
+  // ±22 at the default zoom of 12, which reaches the corners of the view.
+  const span = Math.min(22, Math.max(9, Math.ceil((zoom * 22) / 12)))
+  if (span === shadowSpan) return
+  shadowSpan = span
+  Object.assign(sun.shadow.camera, { left: -span, right: span, top: span, bottom: -span })
+  sun.shadow.camera.updateProjectionMatrix()
+  shadowsDirty = true
+}
 frameIso()
+
+// People walking, traffic, steam.
+const life = buildLife(map, focus, blob, crowd, iso.quaternion)
+streetScene.add(life.group, crowd.build())
 
 // ── Applying the controls ────────────────────────────────────────────────
 
@@ -335,6 +348,7 @@ gl.setAnimationLoop((ms) => {
   if (frame > 0) adapt(frame)
   gl.info.reset()
   if (Math.abs(zoom - zoomTarget) > 0.001) { zoom += (zoomTarget - zoom) * 0.18; frameIso() }
+  if (state.scene === 'street') fitShadow()
   if (state.scene === 'street') {
     street.update(focus.x, focus.z, night, wet)
     life.update(ms / 1000, dt, night)

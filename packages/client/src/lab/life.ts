@@ -4,8 +4,8 @@
 // steam rises from grates in the road.
 
 import {
-  AdditiveBlending, CanvasTexture, Color, CylinderGeometry, DynamicDrawUsage, Group, InstancedMesh, Mesh, MeshBasicMaterial, MeshStandardMaterial,
-  NormalBlending, Object3D, PlaneGeometry, Sprite, SpriteMaterial, Vector3, type BufferGeometry, type Material, type Matrix4, type Texture,
+  AdditiveBlending, CanvasTexture, Color, CylinderGeometry, DynamicDrawUsage, Group, InstancedMesh, MeshBasicMaterial, MeshStandardMaterial,
+  InstancedBufferAttribute, NormalBlending, Object3D, PlaneGeometry, Vector3, type Quaternion, type BufferGeometry, type Material, type Matrix4, type Texture,
 } from 'three'
 import { findPath, hashString, Tile, type DistrictMap, type XY } from '@sprawl/shared'
 import { animateWalk, buildFigure, type Crowd, type FigureSpec, type Rig } from './figure.ts'
@@ -125,13 +125,13 @@ function buildFleet(paints: number[], taxis: number, beamTex: Texture) {
     return mesh
   }
   const body = part(
-    slab(0.95, 0.44, 0.2, 0.1, 0.05, 8).translate(0, 0.06, 0),
+    slab(0.95, 0.44, 0.2, 0.1, 0.05, 5).translate(0, 0.06, 0),
     hazed(new MeshStandardMaterial({ roughness: 0.35, metalness: 0.3 }), 'car'), n, true,
   )
   const colour = new Color()
   paints.forEach((hex, i) => body.setColorAt(i, colour.setHex(hex)))
   const cabin = part(
-    slab(0.52, 0.38, 0.17, 0.08, 0.05, 8).translate(-0.06, 0.25, 0),
+    slab(0.52, 0.38, 0.17, 0.08, 0.05, 5).translate(-0.06, 0.25, 0),
     hazed(new MeshStandardMaterial({ color: 0x16181a, roughness: 0.15, metalness: 0.5 }), 'glass'), n, true,
   )
   const wheels = part(
@@ -189,7 +189,8 @@ export interface Life {
   update(time: number, dt: number, night: number): void
 }
 
-export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture, crowd: Crowd): Life {
+/** `facing` is the camera's rotation: steam puffs turn to face it. */
+export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture, crowd: Crowd, facing: Quaternion): Life {
   const group = new Group()
   const foot = footway(map)
 
@@ -240,22 +241,43 @@ export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture, crowd
 
   // Steam from a few grates in the road near the player.
   const puffTex = puffTexture()
-  const puffs: { s: Sprite; base: Vector3; t0: number }[] = []
+  const puffs: { base: Vector3; t0: number }[] = []
   const grates: [number, number][] = []
   for (let y = 0; y < map.height; y++)
     for (let x = 0; x < map.width; x++)
       if (road(x, y) && Math.hypot(x - focus.x, y - focus.z) < 16 && ((hashString(`grate${x}:${y}`) >>> 0) % 37 === 0)) grates.push([x, y])
-  for (const [gx, gy] of grates.slice(0, 5)) {
-    // A dark grate on the ground.
-    const grate = new Mesh(new PlaneGeometry(0.5, 0.3).rotateX(-Math.PI / 2), hazed(new MeshBasicMaterial({ color: 0x151515 }), 'grate'))
-    grate.position.set(gx, 0.006, gy)
-    group.add(grate)
-    for (let i = 0; i < 7; i++) {
-      const s = new Sprite(new SpriteMaterial({ map: puffTex, transparent: true, depthWrite: false, blending: NormalBlending, color: 0xe8e6e0 }))
-      group.add(s)
-      puffs.push({ s, base: new Vector3(gx, 0, gy), t0: i / 7 })
-    }
+  const vents = grates.slice(0, 5)
+  // Dark grates on the ground.
+  const grateMeshes = new InstancedMesh(new PlaneGeometry(0.5, 0.3).rotateX(-Math.PI / 2), hazed(new MeshBasicMaterial({ color: 0x151515 }), 'grate'), Math.max(1, vents.length))
+  grateMeshes.count = vents.length
+  const at = new Object3D()
+  vents.forEach(([gx, gy], i) => {
+    at.position.set(gx, 0.006, gy)
+    at.updateMatrix()
+    grateMeshes.setMatrixAt(i, at.matrix)
+    for (let k = 0; k < 7; k++) puffs.push({ base: new Vector3(gx, 0, gy), t0: k / 7 })
+  })
+  group.add(grateMeshes)
+  // Puffs: one instanced quad turned to the camera, with its own opacity.
+  const puffMat = new MeshBasicMaterial({ map: puffTex, transparent: true, depthWrite: false, blending: NormalBlending, color: 0xe8e6e0 })
+  puffMat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float aAlpha;\nvarying float vAlpha;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvAlpha = aAlpha;')
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vAlpha;')
+      .replace('#include <map_fragment>', '#include <map_fragment>\ndiffuseColor.a *= vAlpha;')
   }
+  puffMat.customProgramCacheKey = () => 'puff'
+  const puffGeo = new PlaneGeometry(1, 1)
+  const puffAlpha = new InstancedBufferAttribute(new Float32Array(Math.max(1, puffs.length)), 1)
+  puffAlpha.setUsage(DynamicDrawUsage)
+  puffGeo.setAttribute('aAlpha', puffAlpha)
+  const steam = new InstancedMesh(puffGeo, puffMat, Math.max(1, puffs.length))
+  steam.count = puffs.length
+  steam.frustumCulled = false
+  steam.instanceMatrix.setUsage(DynamicDrawUsage)
+  group.add(steam)
 
   const v = new Vector3()
   return {
@@ -307,12 +329,16 @@ export function buildLife(map: DistrictMap, focus: Vector3, blob: Texture, crowd
       fleet.beamMat.opacity = night * 0.28
       fleet.beams.visible = night > 0.05
 
-      for (const p of puffs) {
+      puffs.forEach((p, i) => {
         const t = (time * 0.25 + p.t0) % 1
-        p.s.position.set(p.base.x + Math.sin(t * 5 + p.t0 * 9) * 0.15 + t * 0.4, 0.05 + t * 2.2, p.base.z + t * 0.2)
-        p.s.scale.setScalar(0.3 + t * 1.4)
-        ;(p.s.material as SpriteMaterial).opacity = Math.sin(t * Math.PI) * (0.35 + night * 0.1)
-      }
+        at.position.set(p.base.x + Math.sin(t * 5 + p.t0 * 9) * 0.15 + t * 0.4, 0.05 + t * 2.2, p.base.z + t * 0.2)
+        at.quaternion.copy(facing)
+        at.scale.setScalar(0.3 + t * 1.4)
+        at.updateMatrix()
+        steam.setMatrixAt(i, at.matrix)
+        puffAlpha.array[i] = Math.sin(t * Math.PI) * (0.35 + night * 0.1)
+      })
+      steam.instanceMatrix.needsUpdate = puffAlpha.needsUpdate = true
     },
   }
 }
