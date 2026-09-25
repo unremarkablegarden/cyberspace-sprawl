@@ -128,9 +128,11 @@ function facade(): MeshStandardMaterial {
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
-        // A tower sinks a little deeper than its podium, so its flattened
-        // top hides under the stump instead of fighting it for the same depth.
-        transformed.y = mix(transformed.y, min(transformed.y, aLot.y > 0.01 ? 0.3 : 0.35), pieceCut());`,
+        // Each level sinks a little deeper than the one below it (podium, tower,
+        // crown), so the flattened tower and crown hide under the stump
+        // instead of fighting it, and each other, for the same depth.
+        float floorY = aLot.y < 0.01 ? 0.35 : aLot.y < ${(2 * STOREY + 0.1).toFixed(2)} ? 0.3 : 0.25;
+        transformed.y = mix(transformed.y, min(transformed.y, floorY), pieceCut());`,
       )
       .replace(
         '#include <project_vertex>',
@@ -524,31 +526,36 @@ export function buildStreet(map: DistrictMap): Street {
   }
 
   /**
-   * Where a blade sign hangs: on the tower's face if the sign fits within it,
-   * else on the podium, low enough to sit below its roof. Returns the centre
-   * of the sign (its inner edge against the wall) and its height.
+   * The wall of the building on tile (bx, by), seen from the pavement in
+   * direction (dx, dz): the tower's face if something `half` high around
+   * `want` fits on it at `along` (the position along the wall), else the
+   * podium's, no higher than `below` under its roof. Returns where the wall
+   * stands on the (dx, dz) axis and the height to use, or null off the lots.
    */
+  const wallAt = (bx: number, by: number, dx: number, dz: number, along: number, want: number, half: number, below: number): [number, number] | null => {
+    const lot = lotAt.get(by * map.width + bx)
+    if (!lot) return null
+    const faceOf = (w: number, d: number) => (dx !== 0 ? w : d) / 2
+    const off = dx !== 0 ? along - lot.cz : along - lot.cx
+    const t = lot.tower
+    const onTower = t && want - half >= lot.podium + 0.05 && want + half <= t.top - 0.1 && Math.abs(off) <= (dx !== 0 ? t.d : t.w) / 2 - t.corner - 0.05
+    const face = onTower ? faceOf(t.w, t.d) : faceOf(lot.w, lot.d)
+    const y = onTower ? want : Math.min(want, lot.podium - below)
+    return [dx !== 0 ? lot.cx - dx * face : lot.cz - dz * face, y]
+  }
+
+  /** Where a blade sign hangs: its centre (inner edge against the wall) and height. */
   const mount = (p: Prop): [number, number, number] => {
     const [dx, dz] = ([[0, 1], [-1, 0], [0, -1], [1, 0]] as const)[p.rot]! // towards the building
-    const lot = lotAt.get((p.y + dz) * map.width + (p.x + dx))
     const want = Math.min(p.z * STOREY * 1.5, 3 * STOREY) + 1.0
-    if (!lot) return [p.x + dx * 0.62, want, p.y + dz * 0.62]
-    // Distance from the lot's centre to a face, and the sign's place along it.
-    const faceOf = (w: number, d: number) => (dx !== 0 ? w : d) / 2
-    const along = dx !== 0 ? p.y - lot.cz : p.x - lot.cx
-    const t = lot.tower
-    let face: number, y: number
-    if (t && want - 0.55 >= lot.podium + 0.05 && want + 0.55 <= t.top - 0.1 && Math.abs(along) <= (dx !== 0 ? t.d : t.w) / 2 - t.corner - 0.2) {
-      face = faceOf(t.w, t.d)
-      y = want
-    } else {
-      face = faceOf(lot.w, lot.d)
-      y = Math.min(want, lot.podium - 0.6)
-    }
-    // The lot centre minus the face distance, towards the pavement, plus half the sign's depth.
-    const out = face + 0.16
-    return dx !== 0 ? [lot.cx - dx * out, y, p.y] : [p.x, y, lot.cz - dz * out]
+    const along = dx !== 0 ? p.y : p.x
+    const w = wallAt(p.x + dx, p.y + dz, dx, dz, along, want, 0.55, 0.6)
+    if (!w) return [p.x + dx * 0.62, want, p.y + dz * 0.62]
+    // Half the sign's depth out from the wall.
+    const [at, y] = w
+    return dx !== 0 ? [at - dx * 0.16, y, p.y] : [p.x, y, at - dz * 0.16]
   }
+
 
   // Blade signs sticking out from the facade.
   const neon = map.props.filter((p) => p.kind === PropKind.Neon)
@@ -734,7 +741,10 @@ export function buildStreet(map: DistrictMap): Street {
       const wires = 2 + ((hashString(`w${x}${y}`) >>> 0) % 3)
       for (let k = 0; k < wires; k++) {
         const h0 = 2.6 + ((x * 13 + k * 7) % 10) * 0.16, h1 = 2.6 + ((x * 7 + k * 11) % 10) * 0.16
-        catenary(x - 0.3 + k * 0.08, h0, y - 1.5, x + 0.2 + k * 0.12, h1, y + 2.5, 0.3 + k * 0.06)
+        const ax = x - 0.3 + k * 0.08, bx = x + 0.2 + k * 0.12
+        // Each end on a wall that is there, a hair out from it.
+        const a = wallAt(x, y - 2, 0, -1, ax, h0, 0, 0.12), b = wallAt(x, y + 3, 0, 1, bx, h1, 0, 0.12)
+        if (a && b) catenary(ax, a[1], a[0] + 0.02, bx, b[1], b[0] - 0.02, 0.3 + k * 0.06)
       }
     }
   for (let x = 2; x < map.width - 3; x++)
@@ -745,7 +755,9 @@ export function buildStreet(map: DistrictMap): Street {
       const wires = 2 + ((hashString(`v${x}${y}`) >>> 0) % 3)
       for (let k = 0; k < wires; k++) {
         const h0 = 2.6 + ((y * 13 + k * 7) % 10) * 0.16, h1 = 2.6 + ((y * 7 + k * 11) % 10) * 0.16
-        catenary(x - 1.5, h0, y - 0.3 + k * 0.08, x + 2.5, h1, y + 0.2 + k * 0.12, 0.3 + k * 0.06)
+        const az = y - 0.3 + k * 0.08, bz = y + 0.2 + k * 0.12
+        const a = wallAt(x - 2, y, -1, 0, az, h0, 0, 0.12), b = wallAt(x + 3, y, 1, 0, bz, h1, 0, 0.12)
+        if (a && b) catenary(a[0] + 0.02, a[1], az, b[0] - 0.02, b[1], bz, 0.3 + k * 0.06)
       }
     }
   const wireGeo = new BufferGeometry()
